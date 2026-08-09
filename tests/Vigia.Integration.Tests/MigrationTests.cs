@@ -20,10 +20,17 @@ public class MigrationTests(PostgresFixture postgres)
     {
         await using var context = postgres.CreateContext();
 
+        // The slug is unique per run. Every integration test class shares one
+        // container and the database is never reset, so a hardcoded value would
+        // leave a row behind that a later test counting or scanning tenants would
+        // silently trip over — and it would make this test fail on a second run
+        // against the same container for the wrong reason.
+        var slug = $"duplicate-{Guid.NewGuid():N}";
+
         context.Tenants.Add(new Tenant
         {
             Name = "First",
-            Slug = "duplicate-slug",
+            Slug = slug,
             CreatedAt = DateTimeOffset.UnixEpoch,
         });
         await context.SaveChangesAsync();
@@ -31,7 +38,7 @@ public class MigrationTests(PostgresFixture postgres)
         context.Tenants.Add(new Tenant
         {
             Name = "Second",
-            Slug = "duplicate-slug",
+            Slug = slug,
             CreatedAt = DateTimeOffset.UnixEpoch,
         });
 
