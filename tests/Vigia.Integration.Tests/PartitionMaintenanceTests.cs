@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using Vigia.Infrastructure.Partitions;
 
@@ -7,6 +8,27 @@ namespace Vigia.Integration.Tests;
 public class PartitionMaintenanceTests(PostgresFixture postgres)
 {
     private PostgresPartitionMaintenance Maintenance() => new(postgres.ConnectionString);
+
+    /// <summary>Captures warning-level log messages so a test can assert a skip
+    /// was reported rather than silent, without pulling in a mocking library.</summary>
+    private sealed class CapturingLogger : ILogger<PostgresPartitionMaintenance>
+    {
+        public List<string> Warnings { get; } = [];
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            if (logLevel == LogLevel.Warning)
+            {
+                Warnings.Add(formatter(state, exception));
+            }
+        }
+    }
 
     private async Task<int> PartitionCountAsync()
     {
@@ -64,5 +86,56 @@ public class PartitionMaintenanceTests(PostgresFixture postgres)
         Assert.Contains("metric_points_20330606", dropped);
         Assert.Contains("metric_points_20330613", dropped);
         Assert.DoesNotContain("metric_points_20330620", dropped);
+    }
+
+    [Fact]
+    public async Task SkipsAndLogsAPartitionWhoseNameDoesNotMatchTheSchemeButStillDropsNormalOnes()
+    {
+        var logger = new CapturingLogger();
+        var maintenance = new PostgresPartitionMaintenance(postgres.ConnectionString, logger);
+
+        // A normal partition this component named and therefore can retire.
+        var from = new DateTimeOffset(2040, 2, 5, 0, 0, 0, TimeSpan.Zero);
+        var created = await maintenance.EnsurePartitionsAsync("metric_points", from, 1, default);
+        var normalPartition = Assert.Single(created);
+
+        // A rogue partition, on a week nothing else in the suite uses, whose name
+        // does not fit "{table}_yyyyMMdd" — stands in for a hand-crafted or
+        // legacy partition this component never named.
+        const string roguePartition = "metric_points_rogue_partition";
+        await using (var connection = await postgres.OpenConnectionAsync())
+        {
+            await using var create = new NpgsqlCommand(
+                $"""
+                CREATE TABLE {roguePartition} PARTITION OF metric_points
+                FOR VALUES FROM ('2041-01-01 00:00:00+00') TO ('2041-01-08 00:00:00+00');
+                """, connection);
+            await create.ExecuteNonQueryAsync();
+        }
+
+        try
+        {
+            var dropped = await maintenance.DropExpiredAsync(
+                "metric_points", new DateTimeOffset(2042, 1, 1, 0, 0, 0, TimeSpan.Zero), default);
+
+            // Normal drop still works...
+            Assert.Contains(normalPartition, dropped);
+
+            // ...but the unparseable one is left alone rather than guessed at...
+            Assert.DoesNotContain(roguePartition, dropped);
+
+            // ...and the skip is reported, not silent.
+            Assert.Contains(logger.Warnings, warning =>
+                warning.Contains(roguePartition, StringComparison.Ordinal));
+        }
+        finally
+        {
+            // DropExpiredAsync will never remove this partition itself (that is
+            // the point of the test), so it must be cleaned up manually or it
+            // would linger in the shared database forever.
+            await using var connection = await postgres.OpenConnectionAsync();
+            await using var drop = new NpgsqlCommand($"DROP TABLE IF EXISTS {roguePartition};", connection);
+            await drop.ExecuteNonQueryAsync();
+        }
     }
 }
