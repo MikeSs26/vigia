@@ -104,4 +104,51 @@ public class BoundedChannelMetricQueueTests
 
         Assert.Equal(0, queue.Depth);
     }
+
+    [Fact]
+    public async Task ConcurrentProducersAllSucceedWhenQueueHasRoom()
+    {
+        // A single-attempt WaitToWriteAsync + TryWrite can lose a race between
+        // concurrent producers waking for the same freed slot: one wins, the other's
+        // TryWrite fails and gets reported as saturation even though the queue had
+        // room. Capacity is kept far above the producer count so genuine saturation
+        // cannot occur, isolating the lost-race failure mode.
+        const int producers = 32;
+        var queue = Queue(capacity: 256);
+
+        var results = await Task.WhenAll(
+            Enumerable.Range(0, producers)
+                .Select(_ => queue.TryEnqueueAsync(Batch(), default).AsTask()));
+
+        Assert.All(results, Assert.True);
+        Assert.Equal(producers, queue.Depth);
+    }
+
+    [Fact]
+    public async Task CallerCancellationPropagatesRatherThanReturningFalse()
+    {
+        // A caller hangup must never be reported as backpressure: the queue being
+        // saturated and the client cancelling are distinct outcomes with distinct
+        // meanings (429 vs. abandoned request), and collapsing them loses that
+        // distinction.
+        var queue = Queue(capacity: 1);
+        Assert.True(await queue.TryEnqueueAsync(Batch(), default));
+
+        using var cts = new CancellationTokenSource();
+        await cts.CancelAsync();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => queue.TryEnqueueAsync(Batch(), cts.Token).AsTask());
+    }
+
+    [Fact]
+    public async Task SaturationStillReturnsFalseWhenCallerTokenIsHealthy()
+    {
+        // Pins the original contract: with no caller cancellation in play, running
+        // out of room still yields a plain `false`, not an exception.
+        var queue = Queue(capacity: 1);
+
+        Assert.True(await queue.TryEnqueueAsync(Batch(), default));
+        Assert.False(await queue.TryEnqueueAsync(Batch(), default));
+    }
 }

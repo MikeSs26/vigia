@@ -36,18 +36,31 @@ public sealed class BoundedChannelMetricQueue : IMetricQueue
 
         try
         {
-            await _channel.Writer.WaitToWriteAsync(linked.Token);
-
-            if (!_channel.Writer.TryWrite(batch))
+            // Loop rather than wait once. WaitToWriteAsync returning true only means
+            // a slot was free at that moment, and SingleWriter is false, so two
+            // producers can be woken for the same slot with one losing the race.
+            // Treating a lost race as saturation would shed a request the queue had
+            // room for.
+            while (await _channel.Writer.WaitToWriteAsync(linked.Token))
             {
-                return false;
+                if (_channel.Writer.TryWrite(batch))
+                {
+                    Interlocked.Increment(ref _depth);
+                    return true;
+                }
             }
 
-            Interlocked.Increment(ref _depth);
-            return true;
+            // WaitToWriteAsync returned false: the writer is completed and nothing
+            // will ever be accepted again.
+            return false;
         }
-        catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+        catch (OperationCanceledException)
+            when (timeout.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
         {
+            // Saturated: the wait ran out of time. The second condition keeps this
+            // distinct from a caller-initiated cancellation, which must propagate.
+            // One means "shed this request with 429", the other means "the client
+            // hung up" — collapsing them would report a hangup as backpressure.
             return false;
         }
     }
