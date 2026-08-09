@@ -45,4 +45,62 @@ public class SeriesKeyTests
 
         Assert.NotEqual(first, second);
     }
+
+    [Fact]
+    public void LabelValueWithDoubleQuoteIsEscaped()
+    {
+        var result = SeriesKey.CanonicaliseLabels(new Dictionary<string, string>
+        {
+            ["msg"] = "say \"hi\"",
+        });
+
+        Assert.Equal("""{"msg":"say \"hi\""}""", result);
+    }
+
+    [Fact]
+    public void LabelValueWithBackslashIsEscaped()
+    {
+        var result = SeriesKey.CanonicaliseLabels(new Dictionary<string, string>
+        {
+            ["path"] = "a\\b",
+        });
+
+        Assert.Equal("""{"path":"a\\b"}""", result);
+    }
+
+    [Fact]
+    public void LabelValueWithBackslashAndQuotePinsEscapeOrder()
+    {
+        // Escape() must replace backslashes before quotes. Reversing that
+        // order would under-escape a backslash that precedes a quote, so this
+        // pins the exact output rather than only checking that escaping
+        // happened.
+        var result = SeriesKey.CanonicaliseLabels(new Dictionary<string, string>
+        {
+            ["k"] = "a\\\"b",
+        });
+
+        Assert.Equal("""{"k":"a\\\"b"}""", result);
+    }
+
+    [Fact]
+    public void InjectedQuotesInALabelKeyDoNotCollideWithADistinctLabelSet()
+    {
+        // Adversarial case: a single label whose key smuggles in
+        // quote/colon/comma characters must not canonicalise to the same
+        // string as a genuinely different two-label set. Escaping the key
+        // (not just the value) is what keeps these apart.
+        var twoLabels = SeriesKey.CanonicaliseLabels(new Dictionary<string, string>
+        {
+            ["x"] = "a",
+            ["y"] = "b",
+        });
+
+        var injectedKey = SeriesKey.CanonicaliseLabels(new Dictionary<string, string>
+        {
+            ["x\":\"a\",\"y"] = "b",
+        });
+
+        Assert.NotEqual(twoLabels, injectedKey);
+    }
 }

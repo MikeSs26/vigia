@@ -34,4 +34,18 @@ public class MetricNameTests
         var raw = new string('a', 129);
         Assert.False(MetricName.TryCreate(raw, out _));
     }
+
+    [Fact]
+    public void DefaultConstructionBypassesValidation()
+    {
+        // MetricName is a readonly record struct, so the compiler always keeps
+        // an implicit public parameterless constructor: default(MetricName)
+        // and new MetricName() both produce Value == null without ever going
+        // through TryCreate. This is a known, accepted hazard - the type stays
+        // a struct because the ingest path handles thousands of points per
+        // batch and a class would add a heap allocation per point. TryCreate
+        // is the only validating construction path; callers must honour its
+        // bool result rather than assume any MetricName instance is valid.
+        Assert.Null(default(MetricName).Value);
+    }
 }
