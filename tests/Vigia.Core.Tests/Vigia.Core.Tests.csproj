@@ -17,6 +17,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Vigia.Core\Vigia.Core.csproj" />
+    <ProjectReference Include="..\..\src\Vigia.Api\Vigia.Api.csproj" />
   </ItemGroup>
 
 </Project>
