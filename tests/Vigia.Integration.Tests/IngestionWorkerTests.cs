@@ -1,0 +1,151 @@
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
+using Npgsql;
+using Vigia.Api.Queue;
+using Vigia.Api.Workers;
+using Vigia.Core;
+using Vigia.Infrastructure.Entities;
+using Vigia.Infrastructure.Partitions;
+using Vigia.Infrastructure.Series;
+using Vigia.Infrastructure.Writing;
+
+namespace Vigia.Integration.Tests;
+
+[Collection("postgres")]
+public class IngestionWorkerTests(PostgresFixture postgres)
+{
+    private static readonly DateTimeOffset Anchor =
+        new(2035, 4, 2, 9, 0, 0, TimeSpan.Zero);
+
+    private async Task<(int TenantId, string SourceName)> SeedAsync()
+    {
+        await using var context = postgres.CreateContext();
+
+        var tenant = new Tenant
+        {
+            Name = "Worker",
+            Slug = $"worker-{Guid.NewGuid():N}",
+            CreatedAt = DateTimeOffset.UnixEpoch,
+        };
+        context.Tenants.Add(tenant);
+        await context.SaveChangesAsync();
+
+        var name = $"host-{Guid.NewGuid():N}";
+        context.Sources.Add(new Source { TenantId = tenant.Id, Name = name, Kind = SourceKind.Host });
+        await context.SaveChangesAsync();
+
+        return (tenant.Id, name);
+    }
+
+    private IngestionWorker CreateWorker(IMetricQueue queue) =>
+        new(queue,
+            new SeriesResolver(postgres.ConnectionString),
+            new SourceResolver(postgres.ConnectionString),
+            new NpgsqlCopyMetricWriter(postgres.ConnectionString),
+            Options.Create(new IngestionOptions
+            {
+                MaxBatchPoints = 1000,
+                FlushIntervalMilliseconds = 20,
+            }),
+            NullLogger<IngestionWorker>.Instance);
+
+    private static MetricBatch Batch(int tenantId, string sourceName, int count)
+    {
+        MetricName.TryCreate("cpu.usage", out var name);
+        var points = Enumerable.Range(0, count)
+            .Select(i => new MetricPoint(name, "percent", Anchor.AddSeconds(i), i))
+            .ToList();
+
+        return new MetricBatch(tenantId, sourceName, points);
+    }
+
+    private async Task<int> CountAsync(int tenantId)
+    {
+        await using var connection = await postgres.OpenConnectionAsync();
+        await using var command = new NpgsqlCommand(
+            """
+            SELECT count(*) FROM metric_points p
+            JOIN metric_series s ON s.id = p.series_id
+            WHERE s.tenant_id = @t;
+            """, connection);
+        command.Parameters.AddWithValue("t", tenantId);
+        return Convert.ToInt32(await command.ExecuteScalarAsync());
+    }
+
+    [Fact]
+    public async Task DrainsTheQueueAndPersistsPoints()
+    {
+        var (tenantId, sourceName) = await SeedAsync();
+        await new PostgresPartitionMaintenance(postgres.ConnectionString)
+            .EnsurePartitionsAsync("metric_points", Anchor, 1, default);
+
+        var queue = new BoundedChannelMetricQueue(
+            Options.Create(new QueueOptions { Capacity = 64 }));
+        await queue.TryEnqueueAsync(Batch(tenantId, sourceName, 120), default);
+
+        var worker = CreateWorker(queue);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+        await worker.StartAsync(cts.Token);
+        while (await CountAsync(tenantId) < 120 && !cts.IsCancellationRequested)
+        {
+            await Task.Delay(50, CancellationToken.None);
+        }
+        await worker.StopAsync(CancellationToken.None);
+
+        Assert.Equal(120, await CountAsync(tenantId));
+    }
+
+    [Fact]
+    public async Task StampsLastSeenOnTheSource()
+    {
+        var (tenantId, sourceName) = await SeedAsync();
+        await new PostgresPartitionMaintenance(postgres.ConnectionString)
+            .EnsurePartitionsAsync("metric_points", Anchor, 1, default);
+
+        var queue = new BoundedChannelMetricQueue(
+            Options.Create(new QueueOptions { Capacity = 64 }));
+        await queue.TryEnqueueAsync(Batch(tenantId, sourceName, 5), default);
+
+        var worker = CreateWorker(queue);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+        await worker.StartAsync(cts.Token);
+        while (await CountAsync(tenantId) < 5 && !cts.IsCancellationRequested)
+        {
+            await Task.Delay(50, CancellationToken.None);
+        }
+        await worker.StopAsync(CancellationToken.None);
+
+        await using var context = postgres.CreateContext();
+        var source = context.Sources.Single(s => s.TenantId == tenantId && s.Name == sourceName);
+        Assert.NotNull(source.LastSeenAt);
+    }
+
+    [Fact]
+    public async Task DiscardsBatchesForUnregisteredSourcesWithoutStopping()
+    {
+        var (tenantId, sourceName) = await SeedAsync();
+        await new PostgresPartitionMaintenance(postgres.ConnectionString)
+            .EnsurePartitionsAsync("metric_points", Anchor, 1, default);
+
+        var queue = new BoundedChannelMetricQueue(
+            Options.Create(new QueueOptions { Capacity = 64 }));
+
+        // Unknown source first: the worker must skip it and still process what follows.
+        await queue.TryEnqueueAsync(Batch(tenantId, "never-registered", 3), default);
+        await queue.TryEnqueueAsync(Batch(tenantId, sourceName, 7), default);
+
+        var worker = CreateWorker(queue);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+        await worker.StartAsync(cts.Token);
+        while (await CountAsync(tenantId) < 7 && !cts.IsCancellationRequested)
+        {
+            await Task.Delay(50, CancellationToken.None);
+        }
+        await worker.StopAsync(CancellationToken.None);
+
+        Assert.Equal(7, await CountAsync(tenantId));
+    }
+}
