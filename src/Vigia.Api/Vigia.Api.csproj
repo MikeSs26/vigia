@@ -4,4 +4,9 @@
     <ProjectReference Include="..\Vigia.Infrastructure\Vigia.Infrastructure.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <PackageReference Include="FluentValidation" />
+    <PackageReference Include="Serilog.AspNetCore" />
+  </ItemGroup>
+
 </Project>
