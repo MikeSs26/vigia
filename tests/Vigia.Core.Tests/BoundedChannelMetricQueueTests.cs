@@ -125,6 +125,53 @@ public class BoundedChannelMetricQueueTests
     }
 
     [Fact]
+    public async Task WaitToReadAsyncReturnsTrueOnceABatchIsAvailable()
+    {
+        var queue = Queue(capacity: 4);
+
+        var waitTask = queue.WaitToReadAsync(default).AsTask();
+        Assert.False(waitTask.IsCompleted);
+
+        await queue.TryEnqueueAsync(Batch(), default);
+
+        Assert.True(await waitTask);
+    }
+
+    [Fact]
+    public async Task WaitToReadAsyncPropagatesCancellationRatherThanTimingOutSilently()
+    {
+        var queue = Queue(capacity: 4);
+
+        using var cts = new CancellationTokenSource();
+        var waitTask = queue.WaitToReadAsync(cts.Token).AsTask();
+
+        await cts.CancelAsync();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => waitTask);
+    }
+
+    [Fact]
+    public async Task TryDequeueReadsAnAvailableBatchAndDecrementsDepth()
+    {
+        var queue = Queue(capacity: 4);
+        await queue.TryEnqueueAsync(Batch("only"), default);
+
+        Assert.True(await queue.WaitToReadAsync(default));
+        Assert.True(queue.TryDequeue(out var batch));
+        Assert.Equal("only", batch?.SourceName);
+        Assert.Equal(0, queue.Depth);
+    }
+
+    [Fact]
+    public void TryDequeueReturnsFalseWhenNothingIsBuffered()
+    {
+        var queue = Queue(capacity: 4);
+
+        Assert.False(queue.TryDequeue(out var batch));
+        Assert.Null(batch);
+    }
+
+    [Fact]
     public async Task ConcurrentProducersRacingForFreedSlotsAllSucceedEventually()
     {
         // Capacity 1 with a consumer draining continuously forces producers to

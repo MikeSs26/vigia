@@ -16,5 +16,30 @@ public interface IMetricQueue
 
     IAsyncEnumerable<MetricBatch> DequeueAllAsync(CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Waits until a batch is available to read or the queue is closed and
+    /// drained. Returns <c>true</c> when a batch is ready — retrieve it with
+    /// <see cref="TryDequeue"/> — or <c>false</c> once the queue is closed
+    /// and empty and will never yield another batch.
+    ///
+    /// Exists for consumers that need to bound how long they wait for the
+    /// next item, e.g. to flush an already-accumulated batch on a timer even
+    /// when no new data arrives: pass a token that is cancelled after the
+    /// desired timeout and race it against this call, distinguishing a
+    /// timeout from a genuine shutdown by which token fired.
+    /// <see cref="DequeueAllAsync"/> alone cannot express "wait, but give up
+    /// after this long" because it always waits indefinitely for the next
+    /// item once <paramref name="cancellationToken"/> itself hasn't fired.
+    /// </summary>
+    ValueTask<bool> WaitToReadAsync(CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Synchronous, non-blocking attempt to dequeue one batch. Returns
+    /// <c>false</c> with <paramref name="batch"/> set to <c>null</c> when
+    /// nothing is currently available — including the case where another
+    /// reader won a race for the only available item.
+    /// </summary>
+    bool TryDequeue(out MetricBatch? batch);
+
     int Depth { get; }
 }

@@ -148,4 +148,43 @@ public class IngestionWorkerTests(PostgresFixture postgres)
 
         Assert.Equal(7, await CountAsync(tenantId));
     }
+
+    [Fact]
+    public async Task FlushesBufferedPointsWhileTheQueueIsIdle()
+    {
+        var (tenantId, sourceName) = await SeedAsync();
+        await new PostgresPartitionMaintenance(postgres.ConnectionString)
+            .EnsurePartitionsAsync("metric_points", Anchor, 1, default);
+
+        var queue = new BoundedChannelMetricQueue(
+            Options.Create(new QueueOptions { Capacity = 64 }));
+
+        // Comfortably below MaxBatchPoints (1000, from CreateWorker) and
+        // nothing further is ever enqueued: only the flush interval elapsing
+        // while the queue sits idle - not the point-count threshold and not
+        // more traffic arriving - can move these points.
+        await queue.TryEnqueueAsync(Batch(tenantId, sourceName, 5), default);
+
+        var worker = CreateWorker(queue);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+
+        await worker.StartAsync(default);
+        try
+        {
+            while (await CountAsync(tenantId) < 5 && !cts.IsCancellationRequested)
+            {
+                await Task.Delay(20, CancellationToken.None);
+            }
+
+            // Assert while the worker is still running and the queue has
+            // been idle the whole time: stopping the worker first would let
+            // the shutdown drain flush these points and defeat the point of
+            // this test, which is specifically about the idle-queue timer.
+            Assert.Equal(5, await CountAsync(tenantId));
+        }
+        finally
+        {
+            await worker.StopAsync(CancellationToken.None);
+        }
+    }
 }

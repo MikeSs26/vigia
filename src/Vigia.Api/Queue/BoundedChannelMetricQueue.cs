@@ -75,4 +75,20 @@ public sealed class BoundedChannelMetricQueue : IMetricQueue
             yield return batch;
         }
     }
+
+    public ValueTask<bool> WaitToReadAsync(CancellationToken cancellationToken) =>
+        _channel.Reader.WaitToReadAsync(cancellationToken);
+
+    public bool TryDequeue(out MetricBatch? batch)
+    {
+        if (_channel.Reader.TryRead(out var item))
+        {
+            Interlocked.Decrement(ref _depth);
+            batch = item;
+            return true;
+        }
+
+        batch = null;
+        return false;
+    }
 }
