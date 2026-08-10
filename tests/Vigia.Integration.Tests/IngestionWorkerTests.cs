@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Npgsql;
@@ -37,7 +38,7 @@ public class IngestionWorkerTests(PostgresFixture postgres)
         return (tenant.Id, name);
     }
 
-    private IngestionWorker CreateWorker(IMetricQueue queue) =>
+    private IngestionWorker CreateWorker(IMetricQueue queue, int flushIntervalMilliseconds = 20) =>
         new(queue,
             new SeriesResolver(postgres.ConnectionString),
             new SourceResolver(postgres.ConnectionString),
@@ -45,7 +46,7 @@ public class IngestionWorkerTests(PostgresFixture postgres)
             Options.Create(new IngestionOptions
             {
                 MaxBatchPoints = 1000,
-                FlushIntervalMilliseconds = 20,
+                FlushIntervalMilliseconds = flushIntervalMilliseconds,
             }),
             NullLogger<IngestionWorker>.Instance);
 
@@ -186,5 +187,86 @@ public class IngestionWorkerTests(PostgresFixture postgres)
         {
             await worker.StopAsync(CancellationToken.None);
         }
+    }
+
+    [Fact]
+    public async Task StopAsyncDrainsBufferedPointsWhenTheFlushIntervalIsLong()
+    {
+        var (tenantId, sourceName) = await SeedAsync();
+        await new PostgresPartitionMaintenance(postgres.ConnectionString)
+            .EnsurePartitionsAsync("metric_points", Anchor, 1, default);
+
+        var queue = new BoundedChannelMetricQueue(
+            Options.Create(new QueueOptions { Capacity = 64 }));
+
+        // Well under MaxBatchPoints (1000), and nothing further is enqueued.
+        await queue.TryEnqueueAsync(Batch(tenantId, sourceName, 5), default);
+
+        // 60 seconds: long enough that the idle-timer flush added to close
+        // out the previous round cannot plausibly fire during this test, so
+        // persistence here can only come from the shutdown-drain path.
+        var worker = CreateWorker(queue, flushIntervalMilliseconds: 60_000);
+
+        await worker.StartAsync(default);
+        try
+        {
+            // A fixed wait, not a poll: this step asserts an absence
+            // (nothing written yet), so there is nothing to converge
+            // toward. One second is under 2% of the 60-second flush
+            // interval - nowhere near long enough for the interval timer to
+            // fire even by a wide margin of clock jitter - while still
+            // comfortably long enough for the worker to have accumulated
+            // the batch and settled into its wait, so a zero count here
+            // isn't just "checked too early to tell".
+            await Task.Delay(TimeSpan.FromSeconds(1), CancellationToken.None);
+            Assert.Equal(0, await CountAsync(tenantId));
+        }
+        finally
+        {
+            await worker.StopAsync(CancellationToken.None);
+        }
+
+        // BackgroundService.StopAsync awaits ExecuteAsync's completion,
+        // which includes the trailing drain flush, so this is already true
+        // by the time StopAsync returns above. Poll briefly anyway, for the
+        // same determinism style as the other tests, rather than asserting
+        // outright on an implementation detail of BackgroundService.
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        while (await CountAsync(tenantId) < 5 && !cts.IsCancellationRequested)
+        {
+            await Task.Delay(20, CancellationToken.None);
+        }
+
+        Assert.Equal(5, await CountAsync(tenantId));
+    }
+
+    [Fact]
+    public async Task StopsPromptlyRatherThanWaitingOutTheFlushInterval()
+    {
+        var queue = new BoundedChannelMetricQueue(
+            Options.Create(new QueueOptions { Capacity = 64 }));
+
+        // A long interval means a fast StopAsync cannot be explained by the
+        // idle-timer path happening to fire first: if this returns quickly,
+        // it is because cancellation interrupts the wait directly. Nothing
+        // is ever enqueued, so no tenant/source/partition setup is needed -
+        // this test only measures shutdown latency on an idle worker.
+        var worker = CreateWorker(queue, flushIntervalMilliseconds: 60_000);
+
+        await worker.StartAsync(default);
+
+        // Give the worker a moment to actually enter its wait on the empty
+        // queue before measuring, so the timing captures cancellation
+        // responsiveness rather than start-up noise.
+        await Task.Delay(200, CancellationToken.None);
+
+        var stopwatch = Stopwatch.StartNew();
+        await worker.StopAsync(CancellationToken.None);
+        stopwatch.Stop();
+
+        Assert.True(
+            stopwatch.Elapsed < TimeSpan.FromSeconds(1),
+            $"StopAsync took {stopwatch.Elapsed}, expected well under 1 second " +
+            "(the 60 second flush interval configured for this test).");
     }
 }
