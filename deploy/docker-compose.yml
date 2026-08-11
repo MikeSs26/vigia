@@ -18,10 +18,10 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-    deploy:
-      resources:
-        limits:
-          memory: 384M
+    # mem_limit is the plain-Compose key and is enforced the same way regardless
+    # of front-end/version; deploy.resources.limits is Swarm-oriented and only
+    # honoured here as a version-specific behaviour.
+    mem_limit: 384M
 
   api:
     build:
@@ -39,10 +39,7 @@ services:
       # Bound to loopback only: nginx terminates TLS and proxies inward, and the
       # host firewall allows just 22, 80 and 443 from outside.
       - "127.0.0.1:8080:8080"
-    deploy:
-      resources:
-        limits:
-          memory: 256M
+    mem_limit: 256M
 
 volumes:
   postgres-data:

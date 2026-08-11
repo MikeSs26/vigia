@@ -28,6 +28,8 @@ builder.Services.AddDbContext<VigiaDbContext>(options => options.UseNpgsql(conne
 builder.Services.Configure<QueueOptions>(builder.Configuration.GetSection(QueueOptions.SectionName));
 builder.Services.Configure<IngestionOptions>(
     builder.Configuration.GetSection(IngestionOptions.SectionName));
+builder.Services.Configure<MaintenanceOptions>(
+    builder.Configuration.GetSection(MaintenanceOptions.SectionName));
 
 builder.Services.AddSingleton<IMetricQueue, BoundedChannelMetricQueue>();
 builder.Services.AddSingleton<ISeriesResolver>(_ => new SeriesResolver(connectionString));
