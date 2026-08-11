@@ -1,0 +1,11 @@
+**/bin/
+**/obj/
+.git/
+.vs/
+node_modules/
+docs/
+.superpowers/
+tests/
+TestResults/
+*.trx
+artifacts/
