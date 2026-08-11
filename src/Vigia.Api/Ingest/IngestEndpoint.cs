@@ -1,6 +1,10 @@
+using System.Globalization;
 using System.Security.Claims;
 using FluentValidation;
+using Microsoft.Extensions.Options;
+using Microsoft.Net.Http.Headers;
 using Vigia.Api.Auth;
+using Vigia.Api.Queue;
 using Vigia.Core;
 
 namespace Vigia.Api.Ingest;
@@ -21,6 +25,8 @@ public static class IngestEndpoint
         ClaimsPrincipal user,
         IValidator<IngestRequest> validator,
         IMetricQueue queue,
+        IOptions<QueueOptions> queueOptions,
+        HttpContext httpContext,
         CancellationToken cancellationToken)
     {
         var validation = await validator.ValidateAsync(request, cancellationToken);
@@ -58,6 +64,11 @@ public static class IngestEndpoint
         {
             // Saturated. Shedding here is the whole reason the queue is bounded:
             // a visible rejection beats an invisible slide into an OOM kill.
+            // Retry-After turns that rejection into cooperative backpressure: a
+            // client that honours it stops hammering an already-saturated queue.
+            httpContext.Response.Headers[HeaderNames.RetryAfter] =
+                queueOptions.Value.RetryAfterSeconds.ToString(CultureInfo.InvariantCulture);
+
             return Results.Json(
                 new { error = "Ingestion queue is saturated." },
                 statusCode: StatusCodes.Status429TooManyRequests);

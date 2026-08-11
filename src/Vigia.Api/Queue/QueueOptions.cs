@@ -16,4 +16,12 @@ public sealed class QueueOptions
     /// ride out a write batch, short enough that clients are not held open.
     /// </summary>
     public int EnqueueTimeoutMilliseconds { get; init; } = 250;
+
+    /// <summary>
+    /// Value of the <c>Retry-After</c> header sent with a 429. A well-behaved
+    /// client retries after this many seconds instead of hammering an already
+    /// saturated queue; tuned alongside the other queue settings rather than
+    /// hardcoded in the endpoint.
+    /// </summary>
+    public int RetryAfterSeconds { get; init; } = 1;
 }

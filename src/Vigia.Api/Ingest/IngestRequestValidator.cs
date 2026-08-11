@@ -7,6 +7,8 @@ public sealed class IngestRequestValidator : AbstractValidator<IngestRequest>
 {
     public const int MaxPointsPerBatch = 10_000;
     public const int MaxLabels = 8;
+    public const int MaxLabelKeyLength = 64;
+    public const int MaxLabelValueLength = 128;
 
     public static readonly TimeSpan MaxFutureSkew = TimeSpan.FromMinutes(5);
     public static readonly TimeSpan MaxAge = TimeSpan.FromDays(7);
@@ -46,7 +48,15 @@ public sealed class IngestRequestValidator : AbstractValidator<IngestRequest>
 
             point.RuleFor(p => p.Labels!)
                 .Must(l => l is null || l.Count <= MaxLabels)
-                .WithMessage($"At most {MaxLabels} labels per point.");
+                .WithMessage($"At most {MaxLabels} labels per point.")
+                // Label text becomes part of the series identity and therefore
+                // part of a database uniqueness key, so it needs the same kind
+                // of bound Source and Unit already have.
+                .Must(l => l is null || l.All(kv =>
+                    kv.Key.Length <= MaxLabelKeyLength && kv.Value.Length <= MaxLabelValueLength))
+                .WithMessage(
+                    $"Label keys must be at most {MaxLabelKeyLength} characters " +
+                    $"and values at most {MaxLabelValueLength} characters.");
         });
     }
 }

@@ -1,9 +1,12 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Text.Json;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
 using Vigia.Cli;
+using Vigia.Core;
 using Vigia.Infrastructure.Entities;
 using Vigia.Infrastructure.Partitions;
 
@@ -140,5 +143,62 @@ public class IngestEndpointTests(PostgresFixture postgres) : IAsyncLifetime
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
 
+    [Fact]
+    public async Task SaturatedQueueReturns429WithRetryAfter()
+    {
+        // A stub that always refuses drives the endpoint's saturation branch
+        // deterministically, without the timing dependence of actually flooding
+        // a real bounded queue from a test.
+        await using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
+        {
+            builder.UseSetting("ConnectionStrings:Vigia", postgres.ConnectionString);
+            builder.ConfigureServices(services =>
+            {
+                services.RemoveAll<IMetricQueue>();
+                services.AddSingleton<IMetricQueue>(new AlwaysSaturatedMetricQueue());
+            });
+        });
+
+        var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Api-Key", _ingestKey);
+
+        var response = await client.PostAsJsonAsync("/v1/ingest", Payload());
+
+        Assert.Equal(HttpStatusCode.TooManyRequests, response.StatusCode);
+
+        var retryAfter = response.Headers.RetryAfter;
+        Assert.NotNull(retryAfter);
+        Assert.NotNull(retryAfter.Delta);
+        Assert.True(retryAfter.Delta.Value > TimeSpan.Zero);
+
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("Ingestion queue is saturated.", body.GetProperty("error").GetString());
+    }
+
     private sealed record AcceptedResponse(int Accepted);
+
+    /// <summary>A queue that always reports saturation, for driving the endpoint's 429 path.</summary>
+    private sealed class AlwaysSaturatedMetricQueue : IMetricQueue
+    {
+        public ValueTask<bool> TryEnqueueAsync(MetricBatch batch, CancellationToken cancellationToken) =>
+            ValueTask.FromResult(false);
+
+        public async IAsyncEnumerable<MetricBatch> DequeueAllAsync(
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+        {
+            await Task.CompletedTask;
+            yield break;
+        }
+
+        public ValueTask<bool> WaitToReadAsync(CancellationToken cancellationToken) =>
+            ValueTask.FromResult(false);
+
+        public bool TryDequeue(out MetricBatch? batch)
+        {
+            batch = null;
+            return false;
+        }
+
+        public int Depth => 0;
+    }
 }
