@@ -39,8 +39,8 @@ builder.Services.AddSingleton<IPartitionMaintenance>(
 builder.Services.AddScoped<IApiKeyLookup, ApiKeyLookup>();
 builder.Services.AddScoped<IValidator<IngestRequest>, IngestRequestValidator>();
 
-// MaintenanceWorker is registered in Task 13, once it exists.
 builder.Services.AddHostedService<IngestionWorker>();
+builder.Services.AddHostedService<MaintenanceWorker>();
 
 builder.Services
     .AddAuthentication(ApiKeyDefaults.Scheme)
