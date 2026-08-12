@@ -65,17 +65,6 @@ public sealed class BoundedChannelMetricQueue : IMetricQueue
         }
     }
 
-    public async IAsyncEnumerable<MetricBatch> DequeueAllAsync(
-        [System.Runtime.CompilerServices.EnumeratorCancellation]
-        CancellationToken cancellationToken)
-    {
-        await foreach (var batch in _channel.Reader.ReadAllAsync(cancellationToken))
-        {
-            Interlocked.Decrement(ref _depth);
-            yield return batch;
-        }
-    }
-
     public ValueTask<bool> WaitToReadAsync(CancellationToken cancellationToken) =>
         _channel.Reader.WaitToReadAsync(cancellationToken);
 

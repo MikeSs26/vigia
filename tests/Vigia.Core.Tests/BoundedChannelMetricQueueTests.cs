@@ -73,11 +73,9 @@ public class BoundedChannelMetricQueueTests
         Assert.True(await queue.TryEnqueueAsync(Batch("first"), default));
         Assert.False(await queue.TryEnqueueAsync(Batch("second"), default));
 
-        await foreach (var drained in queue.DequeueAllAsync(default))
-        {
-            Assert.Equal("first", drained.SourceName);
-            break;
-        }
+        Assert.True(await queue.WaitToReadAsync(default));
+        Assert.True(queue.TryDequeue(out var drained));
+        Assert.Equal("first", drained?.SourceName);
 
         Assert.True(await queue.TryEnqueueAsync(Batch("third"), default));
     }
@@ -90,16 +88,12 @@ public class BoundedChannelMetricQueueTests
         await queue.TryEnqueueAsync(Batch("b"), default);
 
         var seen = new List<string>();
-        using var cts = new CancellationTokenSource();
 
-        await foreach (var batch in queue.DequeueAllAsync(cts.Token))
+        for (var i = 0; i < 2; i++)
         {
-            seen.Add(batch.SourceName);
-            if (seen.Count == 2)
-            {
-                await cts.CancelAsync();
-                break;
-            }
+            Assert.True(await queue.WaitToReadAsync(default));
+            Assert.True(queue.TryDequeue(out var batch));
+            seen.Add(batch!.SourceName);
         }
 
         Assert.Equal(["a", "b"], seen);
@@ -112,13 +106,10 @@ public class BoundedChannelMetricQueueTests
         await queue.TryEnqueueAsync(Batch(), default);
         await queue.TryEnqueueAsync(Batch(), default);
 
-        var drained = 0;
-        await foreach (var _ in queue.DequeueAllAsync(default))
+        for (var i = 0; i < 2; i++)
         {
-            if (++drained == 2)
-            {
-                break;
-            }
+            Assert.True(await queue.WaitToReadAsync(default));
+            Assert.True(queue.TryDequeue(out _));
         }
 
         Assert.Equal(0, queue.Depth);
@@ -193,10 +184,13 @@ public class BoundedChannelMetricQueueTests
         {
             try
             {
-                await foreach (var _ in queue.DequeueAllAsync(readerCts.Token))
+                while (await queue.WaitToReadAsync(readerCts.Token))
                 {
                     // Drain as fast as possible so producers keep contending for
                     // freshly freed slots instead of settling into single file.
+                    while (queue.TryDequeue(out _))
+                    {
+                    }
                 }
             }
             catch (OperationCanceledException)
