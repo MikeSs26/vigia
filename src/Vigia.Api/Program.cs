@@ -6,6 +6,7 @@ using Serilog;
 using Vigia.Api.Auth;
 using Vigia.Api.Ingest;
 using Vigia.Api.Queue;
+using Vigia.Api.RateLimiting;
 using Vigia.Api.Workers;
 using Vigia.Core;
 using Vigia.Infrastructure;
@@ -30,11 +31,16 @@ builder.Services.Configure<IngestionOptions>(
     builder.Configuration.GetSection(IngestionOptions.SectionName));
 builder.Services.Configure<MaintenanceOptions>(
     builder.Configuration.GetSection(MaintenanceOptions.SectionName));
+builder.Services.Configure<RateLimitingOptions>(
+    builder.Configuration.GetSection(RateLimitingOptions.SectionName));
+builder.Services.AddVigiaRateLimiting();
 
 builder.Services.AddSingleton<IMetricQueue, BoundedChannelMetricQueue>();
 builder.Services.AddSingleton<ISeriesResolver>(_ => new SeriesResolver(connectionString));
 builder.Services.AddSingleton<ISourceResolver>(_ => new SourceResolver(connectionString));
-builder.Services.AddSingleton<IMetricWriter>(_ => new NpgsqlCopyMetricWriter(connectionString));
+builder.Services.AddSingleton<IMetricWriter>(sp => new NpgsqlCopyMetricWriter(
+    connectionString, sp.GetRequiredService<ILogger<NpgsqlCopyMetricWriter>>()));
+builder.Services.AddSingleton<IIngestionMetrics, IngestionMetrics>();
 builder.Services.AddSingleton<IPartitionMaintenance>(
     _ => new PostgresPartitionMaintenance(connectionString));
 
@@ -69,6 +75,7 @@ var app = builder.Build();
 
 app.UseAuthentication();
 app.UseAuthorization();
+app.UseRateLimiter();
 
 app.MapIngest();
 app.MapGet("/health", () => Results.Ok(new { status = "ok" })).AllowAnonymous();
