@@ -1,11 +1,21 @@
 using FluentValidation;
+using Vigia.Api.Queue;
 using Vigia.Core;
 
 namespace Vigia.Api.Ingest;
 
 public sealed class IngestRequestValidator : AbstractValidator<IngestRequest>
 {
-    public const int MaxPointsPerBatch = 10_000;
+    /// <summary>
+    /// Maximum points a single request may carry. This is the other half of
+    /// the queue's memory budget alongside <see cref="QueueOptions.Capacity"/>
+    /// — see the arithmetic on that property and in
+    /// <see cref="QueueMemoryBudget"/>. Raising this number without also
+    /// revisiting Capacity can silently blow that budget; the guard test
+    /// (QueueMemoryBudgetTests, in Vigia.Core.Tests) exists specifically to
+    /// catch that.
+    /// </summary>
+    public const int MaxPointsPerBatch = 2_000;
     public const int MaxLabels = 8;
     public const int MaxLabelKeyLength = 64;
     public const int MaxLabelValueLength = 128;
