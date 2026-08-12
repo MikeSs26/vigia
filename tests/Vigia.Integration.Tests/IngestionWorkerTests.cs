@@ -38,17 +38,23 @@ public class IngestionWorkerTests(PostgresFixture postgres)
         return (tenant.Id, name);
     }
 
-    private IngestionWorker CreateWorker(IMetricQueue queue, int flushIntervalMilliseconds = 20) =>
+    private IngestionWorker CreateWorker(
+        IMetricQueue queue,
+        int flushIntervalMilliseconds = 20,
+        int maxBatchPoints = 1000,
+        IMetricWriter? writer = null) =>
         new(queue,
             new SeriesResolver(postgres.ConnectionString),
             new SourceResolver(postgres.ConnectionString),
-            new NpgsqlCopyMetricWriter(postgres.ConnectionString),
+            writer ?? new NpgsqlCopyMetricWriter(
+                postgres.ConnectionString, NullLogger<NpgsqlCopyMetricWriter>.Instance),
             Options.Create(new IngestionOptions
             {
-                MaxBatchPoints = 1000,
+                MaxBatchPoints = maxBatchPoints,
                 FlushIntervalMilliseconds = flushIntervalMilliseconds,
             }),
-            NullLogger<IngestionWorker>.Instance);
+            NullLogger<IngestionWorker>.Instance,
+            new IngestionMetrics());
 
     private static MetricBatch Batch(int tenantId, string sourceName, int count)
     {
@@ -268,5 +274,72 @@ public class IngestionWorkerTests(PostgresFixture postgres)
             stopwatch.Elapsed < TimeSpan.FromSeconds(1),
             $"StopAsync took {stopwatch.Elapsed}, expected well under 1 second " +
             "(the 60 second flush interval configured for this test).");
+    }
+
+    [Fact]
+    public async Task PointsBufferedWhenTheWorkerStopsMidFlushAreNotLost()
+    {
+        // I3: pre-fix, the in-loop flush was cancelled with stoppingToken, so a
+        // shutdown that landed while a COPY was genuinely in flight cancelled
+        // that COPY. The resulting OperationCanceledException fell through
+        // FlushAsync's catch filter (which excludes cancellation) into its
+        // `finally`, which cleared `pending` regardless of whether the write
+        // actually succeeded — so the shutdown drain found nothing left to
+        // persist, and nothing was ever logged. This test drives that exact
+        // race deterministically with a writer that stalls until told to
+        // proceed, rather than hoping real COPY timing lines up.
+        var (tenantId, sourceName) = await SeedAsync();
+        await new PostgresPartitionMaintenance(postgres.ConnectionString)
+            .EnsurePartitionsAsync("metric_points", Anchor, 1, default);
+
+        var queue = new BoundedChannelMetricQueue(
+            Options.Create(new QueueOptions { Capacity = 64 }));
+        await queue.TryEnqueueAsync(Batch(tenantId, sourceName, 5), default);
+
+        var flushStarted = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var stallingWriter = new StallingMetricWriter(
+            flushStarted,
+            TimeSpan.FromSeconds(1),
+            new NpgsqlCopyMetricWriter(
+                postgres.ConnectionString, NullLogger<NpgsqlCopyMetricWriter>.Instance));
+
+        // MaxBatchPoints = 1 so the 5 accumulated points trigger a "full" flush
+        // as soon as the single enqueued batch is processed, and a very long
+        // flush interval so the idle-timer path cannot be what triggers it.
+        var worker = CreateWorker(
+            queue, flushIntervalMilliseconds: 60_000, maxBatchPoints: 1, writer: stallingWriter);
+
+        await worker.StartAsync(default);
+
+        // Wait until a flush is genuinely in progress (the writer has been
+        // entered and is stalled) before triggering shutdown, so this test
+        // exercises the cancel-mid-write race on purpose rather than by luck.
+        await flushStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        using var stopCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await worker.StopAsync(stopCts.Token);
+
+        Assert.Equal(5, await CountAsync(tenantId));
+    }
+
+    /// <summary>
+    /// Wraps a real writer but stalls before delegating to it, signalling
+    /// <paramref name="started"/> the instant it is entered. The stall is
+    /// awaited with the caller's token, exactly like the real COPY's
+    /// cancellable I/O, so it reproduces the pre-fix failure when driven with
+    /// a token that gets cancelled mid-flush and the post-fix success when
+    /// driven with a token that does not.
+    /// </summary>
+    private sealed class StallingMetricWriter(
+        TaskCompletionSource started, TimeSpan delay, IMetricWriter inner) : IMetricWriter
+    {
+        public async Task<int> WriteAsync(
+            IReadOnlyList<ResolvedPoint> points, CancellationToken cancellationToken)
+        {
+            started.TrySetResult();
+            await Task.Delay(delay, cancellationToken);
+            return await inner.WriteAsync(points, CancellationToken.None);
+        }
     }
 }

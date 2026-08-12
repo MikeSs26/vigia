@@ -17,7 +17,8 @@ public sealed class IngestionWorker(
     ISourceResolver sourceResolver,
     IMetricWriter writer,
     IOptions<IngestionOptions> options,
-    ILogger<IngestionWorker> logger) : BackgroundService
+    ILogger<IngestionWorker> logger,
+    IIngestionMetrics metrics) : BackgroundService
 {
     private readonly IngestionOptions _options = options.Value;
 
@@ -43,7 +44,19 @@ public sealed class IngestionWorker(
                     // Timed out: nothing arrived within the interval. Flush
                     // whatever is buffered (a no-op if pending is empty) and
                     // start the next window.
-                    await FlushAsync(pending, touched, stoppingToken);
+                    //
+                    // CancellationToken.None, not stoppingToken: a shutdown that
+                    // lands while this flush's COPY is already in flight must
+                    // not abort it. A batch is at most MaxBatchPoints rows —
+                    // short — and the container gives the process a 30s stop
+                    // grace, so letting it finish is cheap. Passing
+                    // stoppingToken here was the entire bug: it let shutdown
+                    // cancel an in-progress write, and the resulting
+                    // OperationCanceledException fell through FlushAsync's catch
+                    // filter into its `finally`, which cleared `pending`
+                    // regardless — so the shutdown drain below found nothing
+                    // left to persist, and nothing was ever logged.
+                    await FlushAsync(pending, touched, CancellationToken.None);
                     sinceFlush.Restart();
                     continue;
                 }
@@ -75,7 +88,9 @@ public sealed class IngestionWorker(
 
                 if (full || due)
                 {
-                    await FlushAsync(pending, touched, stoppingToken);
+                    // See the timeout branch above for why this is
+                    // CancellationToken.None rather than stoppingToken.
+                    await FlushAsync(pending, touched, CancellationToken.None);
                     sinceFlush.Restart();
                 }
             }
@@ -188,7 +203,43 @@ public sealed class IngestionWorker(
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger.LogError(ex, "Failed to write {Count} points", pending.Count);
+            // This failure is not attributable to specific rows — the writer
+            // already isolates and normalises the one row-level failure this
+            // pipeline can identify in advance (a non-UTC timestamp offset), so
+            // whatever reaches here is something else entirely: a dropped
+            // connection, a timestamp outside every partition that exists, and
+            // so on. There is no reliable way to tell from a COPY failure which
+            // rows if any were "the" problem, so the whole window is discarded.
+            // What can be done is make that loss loud and actionable: identify
+            // the discarded window precisely, and count it so it is visible to
+            // anything monitoring the process, not just to whoever reads this
+            // log line.
+            var minTimestamp = pending[0].Timestamp;
+            var maxTimestamp = pending[0].Timestamp;
+            var seriesIds = new HashSet<int>();
+            foreach (var point in pending)
+            {
+                if (point.Timestamp < minTimestamp)
+                {
+                    minTimestamp = point.Timestamp;
+                }
+
+                if (point.Timestamp > maxTimestamp)
+                {
+                    maxTimestamp = point.Timestamp;
+                }
+
+                seriesIds.Add(point.SeriesId);
+            }
+
+            logger.LogError(ex,
+                "Failed to write {Count} points spanning {MinTimestamp:o} to {MaxTimestamp:o} " +
+                "across {SeriesCount} series (ids: {SeriesIds}); the whole window is being " +
+                "discarded because the failure cannot be attributed to specific rows",
+                pending.Count, minTimestamp, maxTimestamp, seriesIds.Count,
+                string.Join(",", seriesIds.Take(20)));
+
+            metrics.RecordDropped(pending.Count, "flush_failure");
         }
         finally
         {
