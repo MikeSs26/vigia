@@ -50,9 +50,21 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    command:
-      - "--connection"
-      - "Host=postgres;Port=5432;Database=${POSTGRES_DB};Username=${POSTGRES_USER};Password=${POSTGRES_PASSWORD}"
+    # Not "--connection <connection-string-with-password>": that argument
+    # lands in `docker inspect`, `docker compose config` and
+    # /proc/1/cmdline, all readable by anything with access to the host or
+    # the Docker socket. src/Vigia.Infrastructure/DesignTimeDbContextFactory.cs
+    # already reads VIGIA_DESIGN_CONNECTION and falls back to it when the
+    # bundle is run with no --connection argument at all — verified by
+    # bringing this stack up from an empty volume with this exact
+    # environment variable and no command override (see the fix-wave report
+    # for the transcript). An environment variable is not perfectly secret
+    # either (still visible via `docker inspect`), but it does not appear in
+    # process listings the way an argv entry does, matching how the api
+    # service already passes its own connection string.
+    environment:
+      VIGIA_DESIGN_CONNECTION: >-
+        Host=postgres;Port=5432;Database=${POSTGRES_DB};Username=${POSTGRES_USER};Password=${POSTGRES_PASSWORD}
     # Small and generous: the bundle is a short-lived EF migrator, not the api
     # workload, but it still needs a cap so nothing can eat the host's 1 GB
     # while postgres (384M) and api (256M) are also coming up.
