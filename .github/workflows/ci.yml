@@ -32,9 +32,10 @@ jobs:
 
       - name: Fail on vulnerable packages
         run: |
-          dotnet list package --vulnerable --include-transitive 2>&1 | tee audit.log
-          if grep -q "has the following vulnerable packages" audit.log; then
+          dotnet list package --vulnerable --include-transitive --format json > audit.json
+          if jq -e '[.. | objects | select(has("vulnerabilities"))] | length > 0' audit.json > /dev/null; then
             echo "Vulnerable packages found."
+            jq '.' audit.json
             exit 1
           fi
 
