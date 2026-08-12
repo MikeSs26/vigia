@@ -48,7 +48,11 @@ public sealed class SourceResolver(string connectionString) : ISourceResolver
 
         await using var command = new NpgsqlCommand(
             "UPDATE sources SET last_seen_at = @s WHERE id = @id;", connection);
-        command.Parameters.AddWithValue("s", seenAt);
+        // Npgsql refuses to write a non-zero offset to timestamptz. Nothing
+        // upstream should ever pass one in, but normalising here too means this
+        // call cannot throw on that specific cause regardless of what a future
+        // caller passes.
+        command.Parameters.AddWithValue("s", seenAt.ToUniversalTime());
         command.Parameters.AddWithValue("id", sourceId);
 
         await command.ExecuteNonQueryAsync(cancellationToken);

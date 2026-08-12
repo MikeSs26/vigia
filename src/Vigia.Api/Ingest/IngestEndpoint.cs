@@ -5,6 +5,7 @@ using Microsoft.Extensions.Options;
 using Microsoft.Net.Http.Headers;
 using Vigia.Api.Auth;
 using Vigia.Api.Queue;
+using Vigia.Api.RateLimiting;
 using Vigia.Core;
 
 namespace Vigia.Api.Ingest;
@@ -15,6 +16,7 @@ public static class IngestEndpoint
     {
         app.MapPost("/v1/ingest", HandleAsync)
            .RequireAuthorization(ApiKeyScopes.Ingest)
+           .RequireRateLimiting(RateLimitingPolicies.Ingest)
            .WithName("Ingest");
 
         return app;
@@ -55,7 +57,13 @@ public static class IngestEndpoint
                 });
             }
 
-            points.Add(new MetricPoint(name, point.Unit, point.Ts, point.Value, point.Labels));
+            // Npgsql refuses to write a DateTimeOffset with a non-zero offset to
+            // timestamptz ("only offset 0 (UTC) is supported"), and
+            // System.Text.Json preserves whatever wire offset a client sends.
+            // Normalising here — the true edge of the system — means nothing
+            // downstream (the queue, the worker, the writer) can ever observe a
+            // non-UTC timestamp, regardless of what a client sent.
+            points.Add(new MetricPoint(name, point.Unit, point.Ts.ToUniversalTime(), point.Value, point.Labels));
         }
 
         var batch = new MetricBatch(tenantId, request.Source, points);
