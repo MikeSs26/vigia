@@ -14,7 +14,14 @@ services:
       - postgres-data:/var/lib/postgresql/data
       - ./postgres/tuning.conf:/etc/postgresql/postgresql.conf:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      # -h 127.0.0.1 forces the check over TCP. Without it, pg_isready defaults
+      # to the Unix socket, which the postgres image already accepts
+      # connections on during its first-boot bootstrap phase - before the real
+      # server is listening on TCP. On a fresh volume that made the healthcheck
+      # go "healthy" one restart cycle early, and migrate then hit the
+      # container mid-restart ("Connection refused"). Checking TCP directly
+      # ties healthy to the same listener migrate and api actually connect to.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -22,15 +29,46 @@ services:
     # of front-end/version; deploy.resources.limits is Swarm-oriented and only
     # honoured here as a version-specific behaviour.
     mem_limit: 384M
+    ports:
+      # Loopback only, never 0.0.0.0: the host firewall already allows just 22,
+      # 80 and 443 inbound, so this port was never reachable from outside the
+      # machine anyway. Binding it to 127.0.0.1 makes that explicit and lets
+      # the CLI reach the database from the host for manual verification
+      # (`dotnet run --project src/Vigia.Cli`) without opening anything new.
+      - "127.0.0.1:5432:5432"
+
+  # One-shot: applies the EF Core migration bundle and exits. Runs after
+  # postgres is healthy and before api starts, so schema application happens
+  # exactly once regardless of how many api replicas come up afterwards - see
+  # design doc §16 on why migrations do not run inside the api process.
+  migrate:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: migrate
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command:
+      - "--connection"
+      - "Host=postgres;Port=5432;Database=${POSTGRES_DB};Username=${POSTGRES_USER};Password=${POSTGRES_PASSWORD}"
+    # Small and generous: the bundle is a short-lived EF migrator, not the api
+    # workload, but it still needs a cap so nothing can eat the host's 1 GB
+    # while postgres (384M) and api (256M) are also coming up.
+    mem_limit: 128M
 
   api:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
+      target: runtime
     restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     environment:
       ConnectionStrings__Vigia: >-
         Host=postgres;Port=5432;Database=${POSTGRES_DB};Username=${POSTGRES_USER};Password=${POSTGRES_PASSWORD};Maximum Pool Size=10
