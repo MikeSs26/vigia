@@ -90,6 +90,17 @@ services:
       # host firewall allows just 22, 80 and 443 from outside.
       - "127.0.0.1:8080:8080"
     mem_limit: 256M
+    # Docker's default is 10 seconds, and IngestionWorker's decision to finish
+    # in-flight writes with CancellationToken.None rather than abandon them is
+    # explicitly load-bearing on this number: on SIGTERM the worker flushes its
+    # buffer and then drains whatever batches are still queued, all of it data
+    # already answered 202. That drain is itself bounded
+    # (Ingestion:ShutdownDrainMilliseconds, 10s), and 30s here leaves it room
+    # to finish plus margin for the rest of host shutdown, while matching the
+    # generic host's own 30 second shutdown timeout so neither limit is a
+    # surprise. Past this, Docker sends SIGKILL and anything still queued is
+    # gone regardless of what the process intended.
+    stop_grace_period: 30s
 
 volumes:
   postgres-data:

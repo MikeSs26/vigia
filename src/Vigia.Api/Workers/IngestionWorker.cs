@@ -48,8 +48,11 @@ public sealed class IngestionWorker(
                     // CancellationToken.None, not stoppingToken: a shutdown that
                     // lands while this flush's COPY is already in flight must
                     // not abort it. A batch is at most MaxBatchPoints rows —
-                    // short — and the container gives the process a 30s stop
-                    // grace, so letting it finish is cheap. Passing
+                    // short — and the api service sets stop_grace_period: 30s
+                    // (deploy/docker-compose.yml), so letting it finish is
+                    // cheap. That grace is set explicitly rather than left to
+                    // Docker's 10 second default precisely because this
+                    // decision leans on it. Passing
                     // stoppingToken here was the entire bug: it let shutdown
                     // cancel an in-progress write, and the resulting
                     // OperationCanceledException fell through FlushAsync's catch
@@ -103,8 +106,84 @@ public sealed class IngestionWorker(
             // and silently drop whatever was still buffered.
         }
 
-        // Drain what is still buffered when the host shuts down.
+        await DrainOnShutdownAsync(pending, touched);
+    }
+
+    /// <summary>
+    /// Persists everything the host still owes on shutdown: the points already
+    /// accumulated in <paramref name="pending"/>, and — the part that was
+    /// missing — the batches still sitting in the queue, unread.
+    ///
+    /// The loop above cannot drain those itself. ChannelReader.WaitToReadAsync
+    /// checks its cancellation token before checking for available items, so it
+    /// throws the instant the host stops even against a completely full queue;
+    /// the loop exits and nothing reads the channel again. Everything left
+    /// there had already been answered 202, so dropping it is the worst failure
+    /// this system can have: accepted data lost without a trace.
+    ///
+    /// Bounded by <see cref="IngestionOptions.ShutdownDrainMilliseconds"/> so
+    /// keeping that promise cannot hang shutdown — and if the budget expires
+    /// with batches still queued, the loss is counted and logged rather than
+    /// repeated silently. Silence is the thing being fixed here; an
+    /// unavoidable discard still has to be visible.
+    ///
+    /// Every database call uses CancellationToken.None, consistently with the
+    /// in-loop flushes: this whole method runs after stoppingToken has already
+    /// been cancelled, so any other token would abort it immediately.
+    /// </summary>
+    private async Task DrainOnShutdownAsync(
+        List<ResolvedPoint> pending, Dictionary<int, DateTimeOffset> touched)
+    {
+        var budget = TimeSpan.FromMilliseconds(_options.ShutdownDrainMilliseconds);
+        var elapsed = Stopwatch.StartNew();
+
+        while (elapsed.Elapsed < budget && queue.TryDequeue(out var batch) && batch is not null)
+        {
+            try
+            {
+                await AccumulateAsync(batch, pending, touched, CancellationToken.None);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // Same isolation as the main loop: one bad batch must not cost
+                // us the rest of the drain.
+                logger.LogError(ex,
+                    "Failed to resolve batch for source {Source} in tenant {Tenant} " +
+                    "during the shutdown drain",
+                    batch.SourceName, batch.TenantId);
+                continue;
+            }
+
+            if (pending.Count >= _options.MaxBatchPoints)
+            {
+                await FlushAsync(pending, touched, CancellationToken.None);
+            }
+        }
+
         await FlushAsync(pending, touched, CancellationToken.None);
+
+        // Past the budget (or the writer failed): whatever is left is going to
+        // be lost, so count it exactly. Draining the remainder here is pure
+        // in-memory work — no database, no further waiting — which is what
+        // makes an exact point count affordable at this stage.
+        var discarded = 0;
+        var discardedBatches = 0;
+        while (queue.TryDequeue(out var leftover) && leftover is not null)
+        {
+            discarded += leftover.Points.Count;
+            discardedBatches++;
+        }
+
+        if (discarded > 0)
+        {
+            logger.LogError(
+                "Shutdown drain budget of {BudgetMs}ms expired with batches still queued: " +
+                "discarding {Count} points across {BatchCount} batches that were already " +
+                "accepted with 202 and will never be persisted",
+                _options.ShutdownDrainMilliseconds, discarded, discardedBatches);
+
+            metrics.RecordDropped(discarded, "shutdown_drain_timeout");
+        }
     }
 
     /// <summary>

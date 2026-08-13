@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Npgsql;
@@ -42,7 +43,10 @@ public class IngestionWorkerTests(PostgresFixture postgres)
         IMetricQueue queue,
         int flushIntervalMilliseconds = 20,
         int maxBatchPoints = 1000,
-        IMetricWriter? writer = null) =>
+        IMetricWriter? writer = null,
+        int shutdownDrainMilliseconds = 10_000,
+        ILogger<IngestionWorker>? logger = null,
+        IIngestionMetrics? metrics = null) =>
         new(queue,
             new SeriesResolver(postgres.ConnectionString),
             new SourceResolver(postgres.ConnectionString),
@@ -52,9 +56,10 @@ public class IngestionWorkerTests(PostgresFixture postgres)
             {
                 MaxBatchPoints = maxBatchPoints,
                 FlushIntervalMilliseconds = flushIntervalMilliseconds,
+                ShutdownDrainMilliseconds = shutdownDrainMilliseconds,
             }),
-            NullLogger<IngestionWorker>.Instance,
-            new IngestionMetrics());
+            logger ?? NullLogger<IngestionWorker>.Instance,
+            metrics ?? new IngestionMetrics());
 
     private static MetricBatch Batch(int tenantId, string sourceName, int count)
     {
@@ -323,6 +328,153 @@ public class IngestionWorkerTests(PostgresFixture postgres)
         Assert.Equal(5, await CountAsync(tenantId));
     }
 
+    [Fact]
+    public async Task BatchesStillInTheQueueWhenTheWorkerStopsAreDrainedRatherThanLost()
+    {
+        // I3's sibling. The earlier round fixed the loss of the in-flight
+        // flush buffer at shutdown; batches sitting in the CHANNEL, already
+        // answered 202 but not yet dequeued, were still discarded with no log
+        // and no counter. ChannelReader.WaitToReadAsync checks the
+        // cancellation token before checking for available items, so it throws
+        // the moment the host stops even with a full queue: the loop exits, the
+        // drain flushes only `pending`, and nothing ever reads the channel
+        // again.
+        var (tenantId, sourceName) = await SeedAsync();
+        await new PostgresPartitionMaintenance(postgres.ConnectionString)
+            .EnsurePartitionsAsync("metric_points", Anchor, 1, default);
+
+        var queue = new BoundedChannelMetricQueue(
+            Options.Create(new QueueOptions { Capacity = 64 }));
+
+        // Four batches, five points each. Every one of them is accepted before
+        // the worker starts, so all twenty points have been answered 202.
+        for (var i = 0; i < 4; i++)
+        {
+            Assert.True(await queue.TryEnqueueAsync(Batch(tenantId, sourceName, 5), default));
+        }
+
+        var flushStarted = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var stallingWriter = new StallOnceMetricWriter(
+            flushStarted,
+            TimeSpan.FromSeconds(1),
+            new NpgsqlCopyMetricWriter(
+                postgres.ConnectionString, NullLogger<NpgsqlCopyMetricWriter>.Instance));
+
+        // MaxBatchPoints = 1 so the first dequeued batch flushes immediately,
+        // and that first flush stalls — which parks the worker with three
+        // batches still sitting in the channel. A 60 second flush interval
+        // keeps the idle-timer path out of it.
+        var worker = CreateWorker(
+            queue, flushIntervalMilliseconds: 60_000, maxBatchPoints: 1, writer: stallingWriter);
+
+        await worker.StartAsync(default);
+        await flushStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        // Not incidental to the assertion below: this is what makes the test
+        // about undequeued batches rather than about the flush buffer.
+        Assert.Equal(3, queue.Depth);
+
+        using var stopCts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await worker.StopAsync(stopCts.Token);
+
+        Assert.Equal(20, await CountAsync(tenantId));
+    }
+
+    [Fact]
+    public async Task QueuedBatchesTheDrainBudgetCannotReachAreLoggedAndCountedRatherThanDroppedSilently()
+    {
+        // The drain has to be bounded or shutdown could hang, which means some
+        // discards remain unavoidable. What must never happen again is an
+        // unavoidable discard that leaves no trace, so the budget-expired path
+        // is held to the same standard as the rest: a count in the log and a
+        // number on the dropped-points counter.
+        var (tenantId, sourceName) = await SeedAsync();
+        await new PostgresPartitionMaintenance(postgres.ConnectionString)
+            .EnsurePartitionsAsync("metric_points", Anchor, 1, default);
+
+        var queue = new BoundedChannelMetricQueue(
+            Options.Create(new QueueOptions { Capacity = 64 }));
+        for (var i = 0; i < 4; i++)
+        {
+            Assert.True(await queue.TryEnqueueAsync(Batch(tenantId, sourceName, 5), default));
+        }
+
+        var flushStarted = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var stallingWriter = new StallOnceMetricWriter(
+            flushStarted,
+            TimeSpan.FromSeconds(1),
+            new NpgsqlCopyMetricWriter(
+                postgres.ConnectionString, NullLogger<NpgsqlCopyMetricWriter>.Instance));
+
+        var logger = new CapturingLogger<IngestionWorker>();
+        var metrics = new IngestionMetrics();
+
+        // A zero budget is the deterministic way to express "the drain ran out
+        // of time": three batches are still queued and the drain is allowed no
+        // time at all to persist them.
+        var worker = CreateWorker(
+            queue,
+            flushIntervalMilliseconds: 60_000,
+            maxBatchPoints: 1,
+            writer: stallingWriter,
+            shutdownDrainMilliseconds: 0,
+            logger: logger,
+            metrics: metrics);
+
+        await worker.StartAsync(default);
+        await flushStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(3, queue.Depth);
+
+        using var stopCts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await worker.StopAsync(stopCts.Token);
+
+        // The five points that made it into the stalled flush are still
+        // persisted; the fifteen behind them are lost — loudly.
+        Assert.Equal(5, await CountAsync(tenantId));
+        Assert.Equal(15, metrics.PointsDropped);
+        Assert.Contains(logger.Messages, m =>
+            m.Contains("discarding 15 points across 3 batches", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// Records formatted log messages so a test can assert that a loss was
+    /// actually reported, not merely counted.
+    /// </summary>
+    private sealed class CapturingLogger<T> : ILogger<T>
+    {
+        private readonly List<string> _messages = [];
+
+        public IReadOnlyList<string> Messages
+        {
+            get
+            {
+                lock (_messages)
+                {
+                    return _messages.ToArray();
+                }
+            }
+        }
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            lock (_messages)
+            {
+                _messages.Add(formatter(state, exception));
+            }
+        }
+    }
+
     /// <summary>
     /// Wraps a real writer but stalls before delegating to it, signalling
     /// <paramref name="started"/> the instant it is entered. The stall is
@@ -339,6 +491,31 @@ public class IngestionWorkerTests(PostgresFixture postgres)
         {
             started.TrySetResult();
             await Task.Delay(delay, cancellationToken);
+            return await inner.WriteAsync(points, CancellationToken.None);
+        }
+    }
+
+    /// <summary>
+    /// As <see cref="StallingMetricWriter"/>, but only the first write stalls.
+    /// That is enough to park the worker mid-flush with batches still queued,
+    /// while leaving the shutdown drain free to run at full speed — so a test
+    /// that asserts the drain persists those batches is measuring the drain,
+    /// not a pile of artificial delays racing its time budget.
+    /// </summary>
+    private sealed class StallOnceMetricWriter(
+        TaskCompletionSource started, TimeSpan delay, IMetricWriter inner) : IMetricWriter
+    {
+        private int _writes;
+
+        public async Task<int> WriteAsync(
+            IReadOnlyList<ResolvedPoint> points, CancellationToken cancellationToken)
+        {
+            if (Interlocked.Increment(ref _writes) == 1)
+            {
+                started.TrySetResult();
+                await Task.Delay(delay, cancellationToken);
+            }
+
             return await inner.WriteAsync(points, CancellationToken.None);
         }
     }
