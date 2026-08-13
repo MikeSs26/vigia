@@ -16,15 +16,36 @@ namespace Vigia.Api.Queue;
 public static class QueueMemoryBudget
 {
     /// <summary>
-    /// Working estimate of retained bytes per queued point. ~72 bytes was
-    /// measured for the retained object graph alone (MetricPoint, its
-    /// MetricName and the point's slot in its batch's list); 150 is used here
-    /// to leave margin for what that measurement doesn't count — the
-    /// System.Text.Json scratch allocations (fresh strings per point,
-    /// intermediate buffers) made while deserialising the request body that
-    /// produced the batch.
+    /// Retained bytes for the single most expensive point the validator will
+    /// accept. Measured, not assumed — an assumed figure is what made this
+    /// budget wrong twice.
+    ///
+    /// The measurement deserialises genuine JSON request bodies with
+    /// System.Text.Json, converts them exactly as IngestEndpoint does, retains
+    /// the resulting MetricBatch graph and takes
+    /// <c>GC.GetTotalMemory(forceFullCollection: true)</c> either side of a
+    /// warm-up pass, under the Workstation/non-concurrent GC the api ships with
+    /// (Directory.Build.props). Worst case means every per-point cap at its
+    /// maximum simultaneously: a 128-character name (MetricName.MaxLength), a
+    /// 32-character unit, and <c>MaxLabels</c> (8) labels — the label COUNT is
+    /// what drives cost, because each label is two separate string objects with
+    /// ~24 bytes of header and padding apiece on top of 2 bytes per character —
+    /// carrying <c>MaxTotalLabelChars</c> (256) characters of text between them.
+    ///
+    /// Measured points along that curve, for the record:
+    ///
+    ///   no labels, short name                                    168 B/point
+    ///   8 labels, 8-char keys / 16-char values, short name     1,544 B/point
+    ///   8 labels at 64/128 (per-key/value caps), short name    4,233 B/point
+    ///   8 labels at 64/128, 128-char name, 32-char unit        4,504 B/point
+    ///   8 labels, 256 total label chars, 128-char name  ->     1,944 B/point
+    ///
+    /// The last line is the current worst case; 1,950 rounds it up rather than
+    /// down. Note the fourth line: without a cap on TOTAL label text, the
+    /// per-key and per-value caps alone permit 4,504 bytes per point, which is
+    /// what made 150 B/point a fiction and any Capacity derived from it unsafe.
     /// </summary>
-    public const int EstimatedBytesPerPoint = 150;
+    public const int WorstCaseBytesPerPoint = 1_950;
 
     /// <summary>
     /// Upper bound on what a full queue may retain. Deliberately well under
@@ -40,5 +61,5 @@ public static class QueueMemoryBudget
     /// capacity (in batches) and per-batch point cap.
     /// </summary>
     public static long WorstCaseBytes(int capacity, int maxPointsPerBatch) =>
-        (long)capacity * maxPointsPerBatch * EstimatedBytesPerPoint;
+        (long)capacity * maxPointsPerBatch * WorstCaseBytesPerPoint;
 }

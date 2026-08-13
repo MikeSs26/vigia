@@ -24,7 +24,7 @@ public class QueueMemoryBudgetTests
 
         Assert.True(worstCase <= QueueMemoryBudget.MaxRetainedBytes,
             $"QueueOptions.Capacity ({capacity}) x IngestRequestValidator.MaxPointsPerBatch " +
-            $"({maxPointsPerBatch}) x {QueueMemoryBudget.EstimatedBytesPerPoint} " +
+            $"({maxPointsPerBatch}) x {QueueMemoryBudget.WorstCaseBytesPerPoint} " +
             $"bytes/point = {worstCase:N0} bytes, which exceeds the " +
             $"{QueueMemoryBudget.MaxRetainedBytes:N0}-byte budget. Retune one or both " +
             "settings, or raise the budget deliberately and document why.");

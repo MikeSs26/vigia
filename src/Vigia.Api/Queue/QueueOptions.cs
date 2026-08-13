@@ -10,17 +10,30 @@ public sealed class QueueOptions
     /// out-of-memory kill.
     ///
     /// This bounds batches, not bytes, so it only means what it says alongside
-    /// <c>IngestRequestValidator.MaxPointsPerBatch</c>: at 150 (see
-    /// <see cref="QueueMemoryBudget.EstimatedBytesPerPoint"/>) estimated bytes
-    /// per point, 256 batches x 2,000 points/batch x 150 bytes ~= 73 MiB, which
-    /// is comfortably under <see cref="QueueMemoryBudget.MaxRetainedBytes"/>
-    /// (96 MiB) and, in turn, under the api container's 256 MiB mem_limit (see
-    /// deploy/docker-compose.yml) with room left for the rest of the process.
-    /// A guard test (QueueMemoryBudgetTests, in Vigia.Core.Tests) fails loudly
-    /// if this number and MaxPointsPerBatch are ever retuned in a way that
-    /// blows that budget.
+    /// <c>IngestRequestValidator.MaxPointsPerBatch</c> and the per-point cost
+    /// measured in <see cref="QueueMemoryBudget.WorstCaseBytesPerPoint"/>. The
+    /// arithmetic, in full, so it cannot drift silently:
+    ///
+    ///   32 batches x 1,000 points/batch x 1,950 bytes/point
+    ///     = 62,400,000 bytes = 59.5 MiB
+    ///
+    /// against a <see cref="QueueMemoryBudget.MaxRetainedBytes"/> budget of
+    /// 96 MiB (so 62% of it) and the api container's 256 MiB mem_limit (23% of
+    /// it — see deploy/docker-compose.yml), leaving the rest for the ASP.NET
+    /// Core runtime, Npgsql's pool and in-flight request deserialisation.
+    ///
+    /// The three numbers move together: raising this one, raising
+    /// MaxPointsPerBatch, or loosening any validator cap that feeds
+    /// WorstCaseBytesPerPoint invalidates the other two. A guard test
+    /// (QueueMemoryBudgetTests, in Vigia.Core.Tests) reads this value as
+    /// CONFIGURED — from appsettings.json, not from this class default — and
+    /// fails loudly when the product stops fitting.
+    ///
+    /// The value that ships is set in appsettings.json; this default only
+    /// applies if the Queue section is missing entirely, so it is kept
+    /// identical to the configured one.
     /// </summary>
-    public int Capacity { get; init; } = 256;
+    public int Capacity { get; init; } = 32;
 
     /// <summary>
     /// How long a request waits for room before being rejected. Long enough to

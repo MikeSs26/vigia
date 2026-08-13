@@ -15,10 +15,34 @@ public sealed class IngestRequestValidator : AbstractValidator<IngestRequest>
     /// (QueueMemoryBudgetTests, in Vigia.Core.Tests) exists specifically to
     /// catch that.
     /// </summary>
-    public const int MaxPointsPerBatch = 2_000;
+    public const int MaxPointsPerBatch = 1_000;
     public const int MaxLabels = 8;
     public const int MaxLabelKeyLength = 64;
     public const int MaxLabelValueLength = 128;
+
+    /// <summary>
+    /// Maximum characters of label text — every key plus every value, summed —
+    /// a single point may carry.
+    ///
+    /// <see cref="MaxLabels"/>, <see cref="MaxLabelKeyLength"/> and
+    /// <see cref="MaxLabelValueLength"/> bound each dimension separately, and
+    /// their product is what a queued point can actually cost: 8 x (64 + 128)
+    /// = 1,536 characters, measured at 4,504 retained bytes per point. At that
+    /// figure no useful combination of queue capacity and batch size fits the
+    /// container's memory limit, so the queue's bound stops being a bound and
+    /// the process reaches an OOM kill before it ever sheds load with a 429.
+    /// This cap is what makes the worst case computable and small: it is the
+    /// single number <see cref="QueueMemoryBudget.WorstCaseBytesPerPoint"/> is
+    /// measured against.
+    ///
+    /// 256 characters across at most 8 labels is 32 characters per label —
+    /// several times what real label sets use (region, environment, instance
+    /// id and the like), while cutting the worst case from 4,504 to 1,944
+    /// bytes per point. The per-key and per-value caps stay: they keep any one
+    /// label from consuming the whole allowance, and label text becomes part of
+    /// a database uniqueness key, which wants its own bound regardless.
+    /// </summary>
+    public const int MaxTotalLabelChars = 256;
 
     public static readonly TimeSpan MaxFutureSkew = TimeSpan.FromMinutes(5);
     public static readonly TimeSpan MaxAge = TimeSpan.FromDays(7);
@@ -66,7 +90,25 @@ public sealed class IngestRequestValidator : AbstractValidator<IngestRequest>
                     kv.Key.Length <= MaxLabelKeyLength && kv.Value.Length <= MaxLabelValueLength))
                 .WithMessage(
                     $"Label keys must be at most {MaxLabelKeyLength} characters " +
-                    $"and values at most {MaxLabelValueLength} characters.");
+                    $"and values at most {MaxLabelValueLength} characters.")
+                // The cap that makes the queue's memory bound honest: without
+                // it the caps above still permit 1,536 characters of label text
+                // per point. See MaxTotalLabelChars.
+                .Must(l => l is null || TotalLabelChars(l) <= MaxTotalLabelChars)
+                .WithMessage(
+                    $"Label keys and values combined must be at most " +
+                    $"{MaxTotalLabelChars} characters per point.");
         });
+    }
+
+    private static int TotalLabelChars(Dictionary<string, string> labels)
+    {
+        var total = 0;
+        foreach (var (key, value) in labels)
+        {
+            total += key.Length + value.Length;
+        }
+
+        return total;
     }
 }
