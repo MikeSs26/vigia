@@ -75,7 +75,19 @@ public sealed class IngestionWorker(
 
                 try
                 {
-                    await AccumulateAsync(batch, pending, touched, stoppingToken);
+                    // CancellationToken.None, not stoppingToken: this batch has
+                    // already left the channel and been answered 202, exactly
+                    // like the FlushAsync calls below and in the shutdown drain.
+                    // A shutdown landing mid-resolve (a series-cache miss does a
+                    // database round trip) must not abandon it — the points
+                    // resolved so far would stay in `pending` while the rest of
+                    // the batch is silently never resolved, and the batch itself
+                    // is no longer in the queue for the drain to find. Letting
+                    // this call run to completion keeps every point flowing into
+                    // `pending`, from which it is either flushed by the loop
+                    // above or picked up by DrainOnShutdownAsync's unconditional
+                    // trailing flush.
+                    await AccumulateAsync(batch, pending, touched, CancellationToken.None);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {

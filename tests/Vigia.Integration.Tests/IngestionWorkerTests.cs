@@ -46,9 +46,10 @@ public class IngestionWorkerTests(PostgresFixture postgres)
         IMetricWriter? writer = null,
         int shutdownDrainMilliseconds = 10_000,
         ILogger<IngestionWorker>? logger = null,
-        IIngestionMetrics? metrics = null) =>
+        IIngestionMetrics? metrics = null,
+        ISeriesResolver? seriesResolver = null) =>
         new(queue,
-            new SeriesResolver(postgres.ConnectionString),
+            seriesResolver ?? new SeriesResolver(postgres.ConnectionString),
             new SourceResolver(postgres.ConnectionString),
             writer ?? new NpgsqlCopyMetricWriter(
                 postgres.ConnectionString, NullLogger<NpgsqlCopyMetricWriter>.Instance),
@@ -438,6 +439,84 @@ public class IngestionWorkerTests(PostgresFixture postgres)
             m.Contains("discarding 15 points across 3 batches", StringComparison.Ordinal));
     }
 
+    [Fact]
+    public async Task PointsAccumulatedDuringAShutdownThatLandsMidSeriesResolveAreNotLost()
+    {
+        // Sibling of PointsBufferedWhenTheWorkerStopsMidFlushAreNotLost and
+        // BatchesStillInTheQueueWhenTheWorkerStopsAreDrainedRatherThanLost,
+        // but for the third call site: AccumulateAsync itself. Pre-fix, the
+        // worker's line 78 passed stoppingToken (not CancellationToken.None,
+        // unlike its two siblings) into AccumulateAsync. A series-cache miss
+        // does a database round trip; if shutdown lands during that await, the
+        // resulting OperationCanceledException falls through AccumulateAsync's
+        // caller's `catch (Exception ex) when (ex is not
+        // OperationCanceledException)` filter into the outer `catch
+        // (OperationCanceledException)`, which swallows it. The batch had
+        // already been dequeued from the channel before AccumulateAsync ran,
+        // so DrainOnShutdownAsync's queue scan never sees it either: every
+        // point in that batch is lost, including the ones already resolved
+        // before cancellation, with no log line and no counter increment. This
+        // test drives that race deterministically with a series resolver that
+        // stalls on exactly the first (cache-miss) call, rather than hoping
+        // real database timing lines up.
+        var (tenantId, sourceName) = await SeedAsync();
+        await new PostgresPartitionMaintenance(postgres.ConnectionString)
+            .EnsurePartitionsAsync("metric_points", Anchor, 1, default);
+
+        var queue = new BoundedChannelMetricQueue(
+            Options.Create(new QueueOptions { Capacity = 64 }));
+
+        // All 5 points share the same name/unit/labels (see Batch()), so only
+        // the first one is a genuine cache miss; the rest would resolve from
+        // the in-memory cache in a single uninterrupted tick if they ever got
+        // the chance to run.
+        await queue.TryEnqueueAsync(Batch(tenantId, sourceName, 5), default);
+
+        var resolveStarted = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var stallingResolver = new StallOnceSeriesResolver(
+            resolveStarted,
+            TimeSpan.FromSeconds(1),
+            new SeriesResolver(postgres.ConnectionString));
+
+        var logger = new CapturingLogger<IngestionWorker>();
+        var metrics = new IngestionMetrics();
+
+        // A very long flush interval keeps the idle-timer path out of it, so
+        // persistence can only come from AccumulateAsync completing and the
+        // points then reaching the flush path, either in-loop or via the
+        // shutdown drain's trailing flush.
+        var worker = CreateWorker(
+            queue,
+            flushIntervalMilliseconds: 60_000,
+            seriesResolver: stallingResolver,
+            logger: logger,
+            metrics: metrics);
+
+        await worker.StartAsync(default);
+
+        // Wait until the worker is genuinely stalled inside AccumulateAsync's
+        // series resolution before triggering shutdown, so this exercises the
+        // cancel-mid-resolve race on purpose rather than by luck.
+        await resolveStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        using var stopCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await worker.StopAsync(stopCts.Token);
+
+        // All 5 accepted points must be accounted for: either persisted, or
+        // (if truly unrecoverable) logged and counted on the dropped-points
+        // counter. Pre-fix, none of the above happens: all 5 are silently lost.
+        var written = await CountAsync(tenantId);
+        var accountedFor = written + (int)metrics.PointsDropped;
+
+        Assert.Equal(5, accountedFor);
+        if (metrics.PointsDropped > 0)
+        {
+            Assert.Contains(logger.Messages, m =>
+                m.Contains("points", StringComparison.OrdinalIgnoreCase));
+        }
+    }
+
     /// <summary>
     /// Records formatted log messages so a test can assert that a loss was
     /// actually reported, not merely counted.
@@ -517,6 +596,36 @@ public class IngestionWorkerTests(PostgresFixture postgres)
             }
 
             return await inner.WriteAsync(points, CancellationToken.None);
+        }
+    }
+
+    /// <summary>
+    /// Wraps a real <see cref="ISeriesResolver"/> but stalls before delegating
+    /// on its first call only, signalling <paramref name="started"/> the
+    /// instant it is entered. That models a series-cache miss doing a
+    /// database round trip, without also stalling the cache hits that follow
+    /// once the same key has been resolved. The stall is awaited with the
+    /// caller's token, exactly like the real round trip's cancellable I/O, so
+    /// it reproduces the pre-fix failure when driven with a token that gets
+    /// cancelled mid-resolve and the post-fix success when driven with a
+    /// token that does not.
+    /// </summary>
+    private sealed class StallOnceSeriesResolver(
+        TaskCompletionSource started, TimeSpan delay, ISeriesResolver inner) : ISeriesResolver
+    {
+        private int _calls;
+
+        public int CachedCount => inner.CachedCount;
+
+        public async Task<int> ResolveAsync(SeriesKey key, CancellationToken cancellationToken)
+        {
+            if (Interlocked.Increment(ref _calls) == 1)
+            {
+                started.TrySetResult();
+                await Task.Delay(delay, cancellationToken);
+            }
+
+            return await inner.ResolveAsync(key, CancellationToken.None);
         }
     }
 }
