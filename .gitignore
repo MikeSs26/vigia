@@ -1,0 +1,40 @@
+# Working documents — specs and implementation plans are not part of the deliverable
+docs/superpowers/
+
+# .NET
+bin/
+obj/
+[Dd]ebug/
+[Rr]elease/
+*.user
+*.suo
+*.userprefs
+.vs/
+artifacts/
+TestResults/
+*.trx
+coverage*.json
+coverage*.xml
+*.coverage
+
+# EF Core migration bundles
+efbundle
+efbundle.exe
+
+# Node / dashboard
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+.eslintcache
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+appsettings.Development.json
+appsettings.Local.json
+
+# OS
+.DS_Store
+Thumbs.db
