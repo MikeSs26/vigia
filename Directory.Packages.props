@@ -20,6 +20,14 @@
     <PackageVersion Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.10" />
     <PackageVersion Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.3" />
     <PackageVersion Include="Testcontainers.PostgreSql" Version="4.13.0" />
+    <!-- SSH.NET is a transitive dependency of Testcontainers (via Testcontainers.PostgreSql), not
+         used directly. Pinned past 2025.1.0 because that version is vulnerable to a path traversal
+         in ScpClient.Download() (GHSA-q939-rpr3-3284, High); 2026.0.0 is the first patched release.
+         Testcontainers.PostgreSql 4.13.0 is still the latest on NuGet and hasn't picked up the fix
+         itself, so the transitive version is pinned by hand here (CentralPackageTransitivePinningEnabled
+         promotes this into the whole graph). Remove this pin once Testcontainers ships a version that
+         depends on SSH.NET >= 2026.0.0 on its own. -->
+    <PackageVersion Include="SSH.NET" Version="2026.0.0" />
     <PackageVersion Include="coverlet.collector" Version="6.0.4" />
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
     <PackageVersion Include="xunit" Version="2.9.3" />
