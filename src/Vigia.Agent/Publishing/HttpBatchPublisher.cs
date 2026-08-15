@@ -1,4 +1,3 @@
-using System.Net.Http.Headers;
 using System.Text;
 using Microsoft.Extensions.Logging;
 
@@ -10,8 +9,7 @@ public sealed class HttpBatchPublisher(
 {
     public async Task<PublishOutcome> PublishAsync(string payload, CancellationToken cancellationToken)
     {
-        using var content = new StringContent(payload, Encoding.UTF8);
-        content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+        using var content = new StringContent(payload, Encoding.UTF8, "application/json");
 
         try
         {

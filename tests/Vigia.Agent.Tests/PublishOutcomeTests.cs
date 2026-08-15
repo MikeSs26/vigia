@@ -12,8 +12,9 @@ public class PublishOutcomeTests
             PublishOutcomeClassifier.Classify(HttpStatusCode.Accepted));
 
         // The API answers 202, never 200. Treating 200 as success would hide a
-        // contract change rather than surface it.
-        Assert.NotEqual(PublishOutcome.Accepted,
+        // contract change rather than surface it — so it must fall through to
+        // Retry, not silently become Rejected.
+        Assert.Equal(PublishOutcome.Retry,
             PublishOutcomeClassifier.Classify(HttpStatusCode.OK));
     }
 
@@ -34,7 +35,9 @@ public class PublishOutcomeTests
     [InlineData(HttpStatusCode.Unauthorized)]
     [InlineData(HttpStatusCode.Forbidden)]
     [InlineData(HttpStatusCode.NotFound)]
+    [InlineData(HttpStatusCode.MethodNotAllowed)]
     [InlineData(HttpStatusCode.UnsupportedMediaType)]
+    [InlineData(HttpStatusCode.RequestEntityTooLarge)]
     public void PermanentRefusalsAreRejectedRatherThanRetriedForever(HttpStatusCode status)
     {
         // Retrying these would park a batch the API will never accept at the head
