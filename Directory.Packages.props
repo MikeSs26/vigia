@@ -17,7 +17,11 @@
     <PackageVersion Include="Microsoft.EntityFrameworkCore.Analyzers" Version="10.0.10" />
     <PackageVersion Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.10" />
     <PackageVersion Include="Microsoft.EntityFrameworkCore.Relational" Version="10.0.10" />
-    <PackageVersion Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.10" />
+    <!-- 10.0.11, not 10.0.10: Microsoft.Extensions.Hosting 10.0.11 (added for Vigia.Agent)
+         requires Microsoft.Extensions.Logging.Abstractions >= 10.0.11; with
+         CentralPackageTransitivePinningEnabled this pin applies to the whole graph,
+         including EF Core, which is fine since 10.0.11 is EF Core's own major.minor line. -->
+    <PackageVersion Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.11" />
     <PackageVersion Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.3" />
     <PackageVersion Include="Testcontainers.PostgreSql" Version="4.13.0" />
     <!-- SSH.NET is a transitive dependency of Testcontainers (via Testcontainers.PostgreSql), not
@@ -36,6 +40,11 @@
     <PackageVersion Include="Serilog.AspNetCore" Version="10.0.0" />
     <PackageVersion Include="Microsoft.AspNetCore.Mvc.Testing" Version="10.0.10" />
     <PackageVersion Include="Microsoft.Extensions.TimeProvider.Testing" Version="10.8.0" />
+    <PackageVersion Include="Microsoft.Extensions.Hosting" Version="10.0.11" />
+    <PackageVersion Include="Microsoft.Extensions.Http" Version="10.0.11" />
+    <PackageVersion Include="Serilog.Extensions.Hosting" Version="10.0.0" />
+    <PackageVersion Include="Serilog.Sinks.Console" Version="6.1.1" />
+    <PackageVersion Include="Serilog.Settings.Configuration" Version="10.0.1" />
   </ItemGroup>
 
 </Project>
