@@ -32,8 +32,10 @@ builder.Services.AddHttpClient<IBatchPublisher, HttpBatchPublisher>((provider, c
     client.BaseAddress = new Uri(options.Endpoint);
     client.DefaultRequestHeaders.Add("X-Api-Key", options.ApiKey);
 
-    // Shorter than the reporting interval, so a stalled request cannot make
-    // cycles overlap and pile up.
+    // Bounds worst-case per-cycle latency to roughly twice this value instead
+    // of HttpClient's 100-second default, which would otherwise stall
+    // recovery for minutes after an outage. The sequential do/while loop
+    // already guarantees cycles cannot overlap regardless of this timeout.
     client.Timeout = TimeSpan.FromSeconds(Math.Max(2, options.IntervalSeconds - 2));
 });
 

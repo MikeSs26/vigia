@@ -54,12 +54,39 @@ public sealed class AgentWorker(
         }
 
         var payload = Serialise(metrics);
-        var outcome = await publisher.PublishAsync(payload, cancellationToken);
+        var outcome = await PublishFreshBatchAsync(payload, cancellationToken);
 
         if (outcome == PublishOutcome.Retry)
         {
             spool.Park(payload, timeProvider.GetUtcNow());
             logger.LogInformation("Parked a batch; spool now holds {Count}", spool.Count);
+        }
+    }
+
+    /// <summary>
+    /// Unlike a batch already in the spool -- where TryTakeOldest deliberately
+    /// leaves the file on disk, so an exception mid-drain just leaves it for
+    /// the next cycle to retry -- a fresh batch has no on-disk copy at the
+    /// moment this call is made. HttpBatchPublisher only catches
+    /// HttpRequestException and TaskCanceledException itself; anything else it
+    /// lets through (a JsonException, an ObjectDisposedException on a torn-down
+    /// client, an unwrapped SocketException, and so on) must still result in
+    /// this batch being parked, or it is silently gone the moment the attempt
+    /// fails in a way nobody anticipated. A caller cancellation is the one
+    /// exception that must keep propagating rather than being treated as a
+    /// retryable failure, consistent with how the rest of this codebase
+    /// distinguishes shutdown from a genuine fault.
+    /// </summary>
+    private async Task<PublishOutcome> PublishFreshBatchAsync(string payload, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await publisher.PublishAsync(payload, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "Unexpected failure publishing a fresh batch; parking it instead of losing it");
+            return PublishOutcome.Retry;
         }
     }
 
