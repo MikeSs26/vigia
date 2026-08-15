@@ -1,0 +1,32 @@
+[Unit]
+Description=Vigia host metrics agent
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+# Type=simple, not notify: readiness notification needs Microsoft.Extensions
+# .Hosting.Systemd and a UseSystemd() call, neither of which this plan adds.
+# Declaring notify without them makes systemd wait for a signal that never
+# arrives and then kill the service as failed to start.
+Type=simple
+ExecStart=/opt/vigia-agent/Vigia.Agent
+Restart=always
+RestartSec=10
+User=vigia-agent
+Group=vigia-agent
+EnvironmentFile=/etc/vigia-agent/vigia-agent.env
+WorkingDirectory=/opt/vigia-agent
+
+# The spool is the only state; everything else can be read-only.
+StateDirectory=vigia-agent
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+ReadWritePaths=/var/lib/vigia-agent
+
+# The host has 1 GB shared with PostgreSQL, the API and another service.
+MemoryMax=96M
+
+[Install]
+WantedBy=multi-user.target
