@@ -6,12 +6,16 @@ using Serilog;
 using Vigia.Api.Auth;
 using Vigia.Api.Ingest;
 using Vigia.Api.Queue;
+using Vigia.Api.Querying;
 using Vigia.Api.RateLimiting;
 using Vigia.Api.Workers;
 using Vigia.Core;
+using Vigia.Core.Querying;
 using Vigia.Infrastructure;
 using Vigia.Infrastructure.Auth;
 using Vigia.Infrastructure.Partitions;
+using Vigia.Infrastructure.Querying;
+using Vigia.Infrastructure.Rollups;
 using Vigia.Infrastructure.Series;
 using Vigia.Infrastructure.Writing;
 
@@ -33,6 +37,8 @@ builder.Services.Configure<MaintenanceOptions>(
     builder.Configuration.GetSection(MaintenanceOptions.SectionName));
 builder.Services.Configure<RateLimitingOptions>(
     builder.Configuration.GetSection(RateLimitingOptions.SectionName));
+builder.Services.Configure<RollupOptions>(
+    builder.Configuration.GetSection(RollupOptions.SectionName));
 builder.Services.AddVigiaRateLimiting();
 
 builder.Services.AddSingleton<IMetricQueue, BoundedChannelMetricQueue>();
@@ -44,11 +50,19 @@ builder.Services.AddSingleton<IIngestionMetrics, IngestionMetrics>();
 builder.Services.AddSingleton<IPartitionMaintenance>(
     _ => new PostgresPartitionMaintenance(connectionString));
 
+builder.Services.AddSingleton(new GranularityResolver(QueryLimits.Default));
+builder.Services.AddSingleton<IMetricQueryReader>(_ => new PostgresMetricQueryReader(connectionString));
+builder.Services.AddSingleton<IRollupWatermarkStore>(
+    _ => new PostgresRollupWatermarkStore(connectionString));
+builder.Services.AddSingleton<IRollupAggregator>(
+    _ => new PostgresRollupAggregator(connectionString));
+
 builder.Services.AddScoped<IApiKeyLookup, ApiKeyLookup>();
 builder.Services.AddScoped<IValidator<IngestRequest>, IngestRequestValidator>();
 
 builder.Services.AddHostedService<IngestionWorker>();
 builder.Services.AddHostedService<MaintenanceWorker>();
+builder.Services.AddHostedService<RollupWorker>();
 
 builder.Services
     .AddAuthentication(ApiKeyDefaults.Scheme)
@@ -78,6 +92,7 @@ app.UseAuthorization();
 app.UseRateLimiter();
 
 app.MapIngest();
+app.MapSeries();
 app.MapGet("/health", () => Results.Ok(new { status = "ok" })).AllowAnonymous();
 
 app.Run();

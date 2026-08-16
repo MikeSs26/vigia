@@ -4,4 +4,6 @@ namespace Vigia.Api.RateLimiting;
 public static class RateLimitingPolicies
 {
     public const string Ingest = "ingest";
+
+    public const string Read = "read";
 }

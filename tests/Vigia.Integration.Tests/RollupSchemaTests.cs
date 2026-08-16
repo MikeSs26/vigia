@@ -87,8 +87,12 @@ public class RollupSchemaTests(PostgresFixture postgres)
         var again = await maintenance.EnsurePartitionsAsync("metric_rollups_1m", anchor, 2, default);
         Assert.Empty(again);
 
+        // The horizon covers this test's two weeks and nothing else. A wider one
+        // would drop partitions belonging to other fixtures in this shared
+        // database, and assertions on the total would then depend on run order.
         var dropped = await maintenance.DropExpiredAsync(
-            "metric_rollups_1m", anchor.AddDays(30), default);
-        Assert.Equal(2, dropped.Count);
+            "metric_rollups_1m", anchor.AddDays(14), default);
+
+        Assert.All(created, name => Assert.Contains(name, dropped));
     }
 }

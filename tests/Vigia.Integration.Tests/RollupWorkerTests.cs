@@ -68,6 +68,20 @@ public class RollupWorkerTests(PostgresFixture postgres) : IAsyncLifetime
             time,
             NullLogger<RollupWorker>.Instance);
 
+    /// <summary>
+    /// Pins where this test's worker starts. Cold-start seeding reads the oldest
+    /// raw point in the whole table, and the suite's other fixtures write points
+    /// months earlier — without pinning, a bounded cycle spends itself on their
+    /// data and never reaches this test's window.
+    /// </summary>
+    private async Task SeedWatermarksAsync(DateTimeOffset at)
+    {
+        var store = new PostgresRollupWatermarkStore(postgres.ConnectionString);
+
+        await store.WriteAsync(_minuteKey, at, at, default);
+        await store.WriteAsync(_hourKey, at, at, default);
+    }
+
     private async Task InsertPointAsync(DateTimeOffset ts, double value)
     {
         await using var connection = await postgres.OpenConnectionAsync();
@@ -102,7 +116,12 @@ public class RollupWorkerTests(PostgresFixture postgres) : IAsyncLifetime
             await InsertPointAsync(Anchor.AddMinutes(i), 10.0 + i);
         }
 
-        await Worker(new FakeTimeProvider(Anchor.AddMinutes(10))).RunCycleAsync(default);
+        // No watermark is written first: this is the cold start. The cap is wide
+        // enough to cover whatever history the shared database already holds in
+        // one cycle, so the test measures the seeding behaviour rather than how
+        // many cycles the catch-up happens to need.
+        await Worker(new FakeTimeProvider(Anchor.AddMinutes(10)), maxMinuteBuckets: 10_000_000)
+            .RunCycleAsync(default);
 
         Assert.Equal(5, await MinuteBucketCountAsync());
     }
@@ -110,6 +129,7 @@ public class RollupWorkerTests(PostgresFixture postgres) : IAsyncLifetime
     [Fact]
     public async Task TheWatermarkAdvancesToTheBucketInProgress()
     {
+        await SeedWatermarksAsync(Anchor);
         await InsertPointAsync(Anchor.AddMinutes(1), 1.0);
 
         var now = Anchor.AddMinutes(10).AddSeconds(30);
@@ -126,6 +146,7 @@ public class RollupWorkerTests(PostgresFixture postgres) : IAsyncLifetime
     [Fact]
     public async Task ASecondCycleWithNoNewDataIsHarmless()
     {
+        await SeedWatermarksAsync(Anchor);
         await InsertPointAsync(Anchor.AddMinutes(2), 5.0);
 
         var time = new FakeTimeProvider(Anchor.AddMinutes(10));
@@ -142,6 +163,8 @@ public class RollupWorkerTests(PostgresFixture postgres) : IAsyncLifetime
     {
         // A single statement over an unbounded backlog is what gets killed on a
         // 1 GB host. The cap turns that into several small statements.
+        await SeedWatermarksAsync(Anchor);
+
         for (var i = 0; i < 12; i++)
         {
             await InsertPointAsync(Anchor.AddMinutes(i), i);
@@ -164,6 +187,8 @@ public class RollupWorkerTests(PostgresFixture postgres) : IAsyncLifetime
     public async Task ALatePointInAnAlreadyComputedBucketIsAbsorbedByTheTrailingRecompute()
     {
         var bucket = Anchor.AddMinutes(3);
+
+        await SeedWatermarksAsync(Anchor);
         await InsertPointAsync(bucket.AddSeconds(1), 10.0);
 
         var time = new FakeTimeProvider(bucket.AddMinutes(1).AddSeconds(30));
@@ -187,6 +212,7 @@ public class RollupWorkerTests(PostgresFixture postgres) : IAsyncLifetime
     [Fact]
     public async Task HourBucketsAppearInTheSameCycleAsTheMinutesTheyCover()
     {
+        await SeedWatermarksAsync(Anchor);
         await InsertPointAsync(Anchor.AddMinutes(1), 10.0);
 
         await Worker(new FakeTimeProvider(Anchor.AddHours(2))).RunCycleAsync(default);
