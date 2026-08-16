@@ -5,6 +5,13 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Lets the integration tests drive one worker cycle directly instead of
+         waiting on a real timer, which is the difference between a test that
+         takes milliseconds and one that takes minutes. -->
+    <InternalsVisibleTo Include="Vigia.Integration.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="FluentValidation" />
     <PackageReference Include="Serilog.AspNetCore" />
   </ItemGroup>
