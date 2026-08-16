@@ -39,20 +39,34 @@ public sealed class MaintenanceWorker(
     {
         var now = timeProvider.GetUtcNow();
 
-        var created = await maintenance.EnsurePartitionsAsync(
-            "metric_points", now, _options.WeeksAhead, cancellationToken);
+        // Each table keeps its own horizon: raw data is expensive and short-lived,
+        // aggregates are cheap and are the only reason history survives at all.
+        (string Table, int RetentionDays)[] tables =
+        [
+            ("metric_points", _options.RawRetentionDays),
+            ("metric_rollups_1m", _options.MinuteRollupRetentionDays),
+            ("metric_rollups_1h", _options.HourRollupRetentionDays),
+        ];
 
-        if (created.Count > 0)
+        foreach (var (table, retentionDays) in tables)
         {
-            logger.LogInformation("Created partitions {Partitions}", string.Join(", ", created));
-        }
+            var created = await maintenance.EnsurePartitionsAsync(
+                table, now, _options.WeeksAhead, cancellationToken);
 
-        var dropped = await maintenance.DropExpiredAsync(
-            "metric_points", now.AddDays(-_options.RawRetentionDays), cancellationToken);
+            if (created.Count > 0)
+            {
+                logger.LogInformation(
+                    "Created partitions on {Table}: {Partitions}", table, string.Join(", ", created));
+            }
 
-        if (dropped.Count > 0)
-        {
-            logger.LogInformation("Dropped expired partitions {Partitions}", string.Join(", ", dropped));
+            var dropped = await maintenance.DropExpiredAsync(
+                table, now.AddDays(-retentionDays), cancellationToken);
+
+            if (dropped.Count > 0)
+            {
+                logger.LogInformation(
+                    "Dropped expired partitions on {Table}: {Partitions}", table, string.Join(", ", dropped));
+            }
         }
     }
 
