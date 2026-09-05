@@ -121,6 +121,38 @@ public class NotificationDeciderTests
     }
 
     [Fact]
+    public void TheKillSwitchOutranksCooldown()
+    {
+        // Precedence, not just presence: with the checks reordered so cooldown
+        // ran first, this would report Cooldown and the kill switch would be
+        // silently demoted below it.
+        var silences = new List<Silence> { new(SilenceTarget.Global, null, Anchor.AddHours(1)) };
+        var context = Context(lastNotifiedAt: Anchor.AddMinutes(-5));
+
+        Assert.Equal(SuppressionReason.KillSwitch, NotificationDecider.Decide(context, silences, Anchor));
+    }
+
+    [Fact]
+    public void ASilenceExpiringExactlyNowNoLongerSuppresses()
+    {
+        // Pins the boundary itself. An expiry test a second past the deadline
+        // passes just as happily with `>=` as with `>`.
+        var silences = new List<Silence> { new(SilenceTarget.Global, null, Anchor) };
+
+        Assert.Equal(SuppressionReason.None, NotificationDecider.Decide(Context(), silences, Anchor));
+    }
+
+    [Fact]
+    public void SeverityEqualToTheChannelMinimumIsDelivered()
+    {
+        // "Minimum severity" means at or above. Without this, an off-by-one that
+        // held back exactly-at-minimum alerts would ship unnoticed.
+        var context = Context(severity: Severity.Warning, minSeverity: Severity.Warning);
+
+        Assert.Equal(SuppressionReason.None, NotificationDecider.Decide(context, [], Anchor));
+    }
+
+    [Fact]
     public void TheKillSwitchStillOutranksARecovery()
     {
         var silences = new List<Silence> { new(SilenceTarget.Global, null, Anchor.AddHours(1)) };
