@@ -31,13 +31,14 @@ alerting paths are not built yet.
 - A host agent that reads `/proc` and the filesystem, and spools batches to local disk when
   the API is unreachable so an outage does not lose the window that contains the incident.
 - An administration CLI for tenants, sources and API keys.
+- Continuous rollups to 1-minute and 1-hour aggregates, so history survives the 7-day
+  expiry of raw points. The worker tracks a persisted watermark, which makes a cold start
+  and a restart after an outage the same operation.
+- `GET /v1/series`, which picks the finest granularity that fits the requested window and
+  refuses combinations that would return more than it should.
 
 **Not built yet**
 
-- Rollups to 1m and 1h aggregates. Raw points are retained for 7 days and nothing
-  aggregates them before they expire, so there is no long-term history.
-- The query API. `POST /v1/ingest` and `GET /health` are the only endpoints; reading
-  measurements back currently means querying PostgreSQL directly.
 - The alert engine, the notification outbox and the Discord integration.
 - SignalR streaming, the dashboard and the public status endpoint.
 
@@ -111,6 +112,53 @@ minutes in the future and no older than 7 days. A batch carries at most 1,000 po
 endpoint answers `202` on acceptance, `400` with `ProblemDetails` on a validation failure,
 and `429` with `Retry-After` when saturated or rate-limited. Sources are never created
 implicitly — an unknown source is a rejection, not an invitation.
+
+### Reading metrics
+
+```http
+GET /v1/series?source=my-host&name=cpu.usage&from=...&to=...&granularity=1m&agg=avg
+X-Api-Key: vg_...
+```
+
+`granularity` is `raw`, `1m` or `1h`, and may be omitted — the finest one that fits the
+window is chosen. `agg` is `avg`, `min`, `max`, `last` or `count`, defaulting to `avg` and
+ignored for raw points. The tenant comes from the key, never from a parameter.
+
+Every response is bounded. Bucketed queries are capped at 10,000 points per series, and raw
+queries are capped by duration rather than by count, because how many raw points a window
+holds depends on how often a source reports. A request that would exceed either is refused
+with a `400` naming a granularity that would fit, rather than served slowly or silently
+downgraded into an answer to a different question.
+
+One entry is returned per label set: the same metric name recorded under different labels
+describes different things, and averaging across them would answer a question nobody asked.
+
+### Rollups and retention
+
+Raw points live 7 days, 1-minute aggregates 30 days, 1-hour aggregates a year. Each table is
+partitioned by time, and expiry is a dropped partition rather than a bulk delete.
+
+Buckets carry `count, sum, min, max, last` rather than an average, which is what makes them
+re-aggregatable: hourly buckets are computed from minutely ones without returning to raw
+data, and averages are derived at read time.
+
+The worker records how far it has aggregated in a persisted watermark, so a cold start
+against a database that already holds history aggregates it rather than skipping it, and a
+restart after an outage resumes instead of leaving a permanent hole.
+
+Each cycle also recomputes a trailing two-hour window rather than only the newest bucket,
+because points do not always arrive in order: the agent's spool replays batches long after
+the measurements in them were taken, and a point that lands behind the watermark enters the
+aggregates only if that window still covers it. Anything arriving later than the window is
+queryable as raw data but never reaches the rollups, and is therefore gone once its raw
+partition expires. Two hours is the trade: it covers a realistic outage at the cost of one
+extra scan of a small, recent range each cycle. The upsert is idempotent, so recomputing a
+range is indistinguishable from computing it once.
+
+The hourly pass never advances past the minutes it is computed from. The two passes are
+capped at different rates, and without that clamp a long backlog would let the hourly pass
+read minutes that had not been written yet, store the fraction it found, and mark those
+hours complete permanently.
 
 ### The agent
 

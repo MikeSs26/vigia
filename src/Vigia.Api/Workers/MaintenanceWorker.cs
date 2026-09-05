@@ -39,20 +39,49 @@ public sealed class MaintenanceWorker(
     {
         var now = timeProvider.GetUtcNow();
 
-        var created = await maintenance.EnsurePartitionsAsync(
-            "metric_points", now, _options.WeeksAhead, cancellationToken);
+        // Each table keeps its own horizon: raw data is expensive and short-lived,
+        // aggregates are cheap and are the only reason history survives at all.
+        //
+        // Every table also reaches BACKWARDS, because neither writer only ever
+        // writes "now". Ingestion accepts timestamps up to the retention horizon
+        // old, and the rollup worker seeds at the oldest raw point and recomputes a
+        // trailing window behind its watermark. A long-running instance happens to
+        // hold those past weeks already — it created them when they were current —
+        // which is why only a fresh database or a long gap exposes the difference.
+        var rawWeeksBehind = (int)Math.Ceiling(_options.RawRetentionDays / 7.0);
 
-        if (created.Count > 0)
+        (string Table, int RetentionDays, int WeeksBehind)[] tables =
+        [
+            ("metric_points", _options.RawRetentionDays, rawWeeksBehind),
+            ("metric_rollups_1m", _options.MinuteRollupRetentionDays, _options.RollupWeeksBehind),
+            ("metric_rollups_1h", _options.HourRollupRetentionDays, _options.RollupWeeksBehind),
+        ];
+
+        foreach (var (table, retentionDays, weeksBehind) in tables)
         {
-            logger.LogInformation("Created partitions {Partitions}", string.Join(", ", created));
-        }
+            // EnsurePartitionsAsync walks forward from the week containing its
+            // start, so reaching backwards is a matter of starting that many weeks
+            // earlier and asking for that many more weeks.
+            var created = await maintenance.EnsurePartitionsAsync(
+                table,
+                now.AddDays(-7 * weeksBehind),
+                weeksBehind + _options.WeeksAhead,
+                cancellationToken);
 
-        var dropped = await maintenance.DropExpiredAsync(
-            "metric_points", now.AddDays(-_options.RawRetentionDays), cancellationToken);
+            if (created.Count > 0)
+            {
+                logger.LogInformation(
+                    "Created partitions on {Table}: {Partitions}", table, string.Join(", ", created));
+            }
 
-        if (dropped.Count > 0)
-        {
-            logger.LogInformation("Dropped expired partitions {Partitions}", string.Join(", ", dropped));
+            var dropped = await maintenance.DropExpiredAsync(
+                table, now.AddDays(-retentionDays), cancellationToken);
+
+            if (dropped.Count > 0)
+            {
+                logger.LogInformation(
+                    "Dropped expired partitions on {Table}: {Partitions}", table, string.Join(", ", dropped));
+            }
         }
     }
 

@@ -59,6 +59,26 @@ public static class RateLimiterServiceCollectionExtensions
                     QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
                 });
             });
+
+            // Its own policy, not a shared one: AddPolicy builds a separate
+            // partitioned limiter per policy, so a read key polling in a loop
+            // exhausts only the read budget and cannot crowd out ingestion.
+            options.AddPolicy(RateLimitingPolicies.Read, httpContext =>
+            {
+                var rateLimiting = httpContext.RequestServices
+                    .GetRequiredService<IOptions<RateLimitingOptions>>().Value;
+
+                var apiKeyId = httpContext.User.FindFirstValue(ClaimTypes.NameIdentifier)
+                    ?? "unknown";
+
+                return RateLimitPartition.GetFixedWindowLimiter(apiKeyId, _ => new FixedWindowRateLimiterOptions
+                {
+                    PermitLimit = rateLimiting.PermitLimit,
+                    Window = TimeSpan.FromSeconds(rateLimiting.WindowSeconds),
+                    QueueLimit = rateLimiting.QueueLimit,
+                    QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+                });
+            });
         });
 
         return services;

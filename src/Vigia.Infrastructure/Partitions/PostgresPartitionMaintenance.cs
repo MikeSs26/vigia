@@ -8,7 +8,8 @@ namespace Vigia.Infrastructure.Partitions;
 public sealed class PostgresPartitionMaintenance(
     string connectionString, ILogger<PostgresPartitionMaintenance>? logger = null) : IPartitionMaintenance
 {
-    private static readonly string[] AllowedTables = ["metric_points"];
+    private static readonly string[] AllowedTables =
+        ["metric_points", "metric_rollups_1m", "metric_rollups_1h"];
 
     // Arbitrary namespace for the first key of pg_advisory_xact_lock(int, int).
     // Scopes our locks away from any other subsystem that might also take
