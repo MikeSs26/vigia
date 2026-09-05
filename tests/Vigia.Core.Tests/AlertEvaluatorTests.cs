@@ -63,6 +63,21 @@ public class AlertEvaluatorTests
     }
 
     [Fact]
+    public void StillBreachingBeforeForElapsesStaysPendingSilently()
+    {
+        // The mutant this kills: promoting to Firing on any breaching evaluation,
+        // ignoring `For` entirely. Without this test the anti-flapping gate — the
+        // whole reason Pending exists — can be deleted and the suite stays green.
+        var pending = new AlertInstanceState(AlertState.Pending, Anchor, 90.0);
+        var later = Anchor.AddSeconds(299);
+
+        var result = AlertEvaluator.Evaluate(Rule(), pending, Flat(90, later), later);
+
+        Assert.Equal(AlertState.Pending, result.NewState.State);
+        Assert.Null(result.Transition);
+    }
+
+    [Fact]
     public void FiringStaysFiringWithoutRenotifying()
     {
         // A metric pinned above its threshold for three days produces one message
