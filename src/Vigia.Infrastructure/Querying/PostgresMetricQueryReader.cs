@@ -23,6 +23,12 @@ public sealed class PostgresMetricQueryReader(string connectionString) : IMetric
         // The table and column names come from an enum through the resolver,
         // never from input, so interpolating them cannot carry anything a caller
         // supplied. Every value is parameterised.
+        //
+        // The tenant predicate below is defence in depth, not the isolation
+        // boundary: source ids are already per-tenant, so filtering by source_id
+        // alone yields the same rows. Removing it fails no test, which is exactly
+        // why it is worth writing down — the boundary that a test can actually
+        // pin is SourceResolver, where (tenant, name) becomes a source id.
         var sql = $"""
             SELECT s.id, s.unit, s.labels::text, p.{timeColumn}, {valueExpression}
             FROM {table} p

@@ -51,15 +51,26 @@ public sealed class GranularityResolver(QueryLimits limits)
     private Resolution Automatic(TimeSpan window)
     {
         // Finest granularity that fits. The cap and the retention horizons are
-        // chosen to agree, so this branch never has to refuse.
+        // chosen to agree, so within a window that could hold data this never has
+        // to refuse — but nothing stops a caller passing year 1 to year 9999, and
+        // an unchecked fallthrough to 1h turned that into a scan of every
+        // partition. Coarsest-still-bounded is the last option, not an escape from
+        // the bound.
         if (window <= RawPreference)
         {
             return new Resolution(Granularity.Raw, null);
         }
 
-        return Fits(window, Granularity.OneMinute)
-            ? new Resolution(Granularity.OneMinute, null)
-            : new Resolution(Granularity.OneHour, null);
+        if (Fits(window, Granularity.OneMinute))
+        {
+            return new Resolution(Granularity.OneMinute, null);
+        }
+
+        return Fits(window, Granularity.OneHour)
+            ? new Resolution(Granularity.OneHour, null)
+            : new Resolution(Granularity.OneHour, string.Create(
+                CultureInfo.InvariantCulture,
+                $"That window is {Buckets(window, Granularity.OneHour):N0} points even at 1h, over the limit of {limits.MaxPointsPerSeries:N0}. Narrow the range."));
     }
 
     private Resolution Explicit(TimeSpan window, Granularity requested)

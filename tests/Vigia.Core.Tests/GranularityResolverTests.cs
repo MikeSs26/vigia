@@ -59,6 +59,19 @@ public class GranularityResolverTests
     }
 
     [Fact]
+    public void AutomaticSelectionStillRefusesAWindowTooLargeEvenForHours()
+    {
+        // Nothing constrains a caller to a window that could hold data. Falling
+        // through to 1h unchecked made "from year 1 to year 9999" an allowed query
+        // — roughly 87 million buckets, and a scan of every partition — which
+        // contradicts this class's whole reason for existing.
+        var resolution = Auto(TimeSpan.FromDays(365 * 2));
+
+        Assert.False(resolution.IsAllowed);
+        Assert.Contains("even at 1h", resolution.Refusal);
+    }
+
+    [Fact]
     public void ExplicitRawIsHonouredInsideTheRawWindow()
     {
         var resolution = Explicit(TimeSpan.FromHours(24), Granularity.Raw);

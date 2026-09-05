@@ -18,6 +18,7 @@ public class SeriesEndpointTests(PostgresFixture postgres) : IAsyncLifetime
     private string _readKey = null!;
     private string _ingestKey = null!;
     private string _sourceName = null!;
+    private string _neighbourReadKey = null!;
 
     public async Task InitializeAsync()
     {
@@ -72,8 +73,60 @@ public class SeriesEndpointTests(PostgresFixture postgres) : IAsyncLifetime
             }
         }
 
+        // A second tenant owning a source with exactly the same name, holding a
+        // different number of points. Reusing the name is the point: it is what
+        // exercises the source resolver's cache key and the query's tenant filter
+        // rather than merely proving that an unknown name is not found.
+        await SeedNeighbourAsync();
+
         _factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
             builder.UseSetting("ConnectionStrings:Vigia", postgres.ConnectionString));
+    }
+
+    private async Task SeedNeighbourAsync()
+    {
+        int tenantId;
+        int sourceId;
+        await using (var context = postgres.CreateContext())
+        {
+            tenantId = await AdminCommands.CreateTenantAsync(
+                context, "Neighbour", $"neighbour-{Guid.NewGuid():N}", DateTimeOffset.UnixEpoch, default);
+
+            sourceId = await AdminCommands.CreateSourceAsync(
+                context, tenantId, _sourceName, SourceKind.Host, default);
+
+            _neighbourReadKey = await AdminCommands.IssueKeyAsync(
+                context, tenantId, "dashboard", ApiKeyScope.Read, DateTimeOffset.UnixEpoch, default);
+        }
+
+        await using var connection = await postgres.OpenConnectionAsync();
+
+        int seriesId;
+        await using (var series = new NpgsqlCommand(
+            """
+            INSERT INTO metric_series (tenant_id, source_id, name, unit, labels)
+            VALUES (@t, @s, 'cpu.usage', 'percent', '{}') RETURNING id;
+            """, connection))
+        {
+            series.Parameters.AddWithValue("t", tenantId);
+            series.Parameters.AddWithValue("s", sourceId);
+
+            seriesId = (int)(await series.ExecuteScalarAsync())!;
+        }
+
+        // Seven, where the first tenant has three: a count no amount of leakage
+        // could produce by coincidence.
+        for (var i = 0; i < 7; i++)
+        {
+            await using var point = new NpgsqlCommand(
+                "INSERT INTO metric_points (series_id, ts, value) VALUES (@s, @ts, @v);", connection);
+
+            point.Parameters.AddWithValue("s", seriesId);
+            point.Parameters.AddWithValue("ts", Anchor.AddSeconds(i).ToUniversalTime());
+            point.Parameters.AddWithValue("v", 99.0);
+
+            await point.ExecuteNonQueryAsync();
+        }
     }
 
     public async Task DisposeAsync() => await _factory.DisposeAsync();
@@ -94,6 +147,42 @@ public class SeriesEndpointTests(PostgresFixture postgres) : IAsyncLifetime
         $"&from={Uri.EscapeDataString(Anchor.ToString("o"))}" +
         $"&to={Uri.EscapeDataString(to ?? Anchor.AddMinutes(30).ToString("o"))}" +
         (granularity is null ? string.Empty : $"&granularity={granularity}");
+
+    [Fact]
+    public async Task EachTenantSeesOnlyItsOwnDataBehindAnIdenticalSourceName()
+    {
+        // Spec §6: a key from one tenant must never reach another tenant's data,
+        // and the tenant comes from the key rather than from any parameter. Both
+        // tenants own a source with this exact name, so the only thing separating
+        // the two answers is that filter.
+        var mine = await Client(_readKey).GetAsync(Url());
+        var theirs = await Client(_neighbourReadKey).GetAsync(Url());
+
+        Assert.Equal(HttpStatusCode.OK, mine.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, theirs.StatusCode);
+
+        Assert.Equal(3, await PointCountAsync(mine));
+        Assert.Equal(7, await PointCountAsync(theirs));
+    }
+
+    [Fact]
+    public async Task ASourceBelongingToAnotherTenantIsNotFound()
+    {
+        var response = await Client(_neighbourReadKey)
+            .GetAsync(Url().Replace(_sourceName, $"host-{Guid.NewGuid():N}", StringComparison.Ordinal));
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    private static async Task<int> PointCountAsync(HttpResponseMessage response)
+    {
+        var payload = await response.Content.ReadFromJsonAsync<JsonElement>();
+        var series = payload.GetProperty("series");
+
+        return series.GetArrayLength() == 0
+            ? 0
+            : series[0].GetProperty("points").GetArrayLength();
+    }
 
     [Fact]
     public async Task AReadKeyGetsThePoints()
