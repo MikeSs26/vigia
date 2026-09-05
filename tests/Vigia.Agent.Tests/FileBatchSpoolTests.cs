@@ -170,15 +170,28 @@ public sealed class FileBatchSpoolTests : IDisposable
     {
         // Reproduces Critical 3 precisely: UnauthorizedAccessException
         // derives from SystemException, not IOException, so a
-        // catch(IOException) does not stop it. A read-only file throws
-        // UnauthorizedAccessException on delete, reliably and without
-        // administrative rights, which is used here instead of an ACL
-        // change to reproduce a permissions failure on Windows.
+        // catch(IOException) does not stop it.
+        //
+        // Making a delete fail without administrative rights takes a different
+        // lever on each platform, and the Windows one is silently a no-op on
+        // Unix: there, deleting depends on write permission to the DIRECTORY,
+        // not to the file, so a read-only file deletes cleanly and the test
+        // proves nothing. Since the agent runs on Linux, that is the platform
+        // this must genuinely cover.
         var spool = Spool();
         spool.Park("payload", DateTimeOffset.UnixEpoch);
         Assert.True(spool.TryTakeOldest(out var batch));
 
-        File.SetAttributes(batch.Path, FileAttributes.ReadOnly);
+        if (OperatingSystem.IsWindows())
+        {
+            File.SetAttributes(batch.Path, FileAttributes.ReadOnly);
+        }
+        else
+        {
+            File.SetUnixFileMode(
+                _directory, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+        }
+
         try
         {
             var exception = Record.Exception(() => spool.Discard(batch));
@@ -187,7 +200,16 @@ public sealed class FileBatchSpoolTests : IDisposable
         finally
         {
             // So the temp-directory cleanup in Dispose can remove the file.
-            File.SetAttributes(batch.Path, FileAttributes.Normal);
+            if (OperatingSystem.IsWindows())
+            {
+                File.SetAttributes(batch.Path, FileAttributes.Normal);
+            }
+            else
+            {
+                File.SetUnixFileMode(
+                    _directory,
+                    UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            }
         }
     }
 
@@ -205,13 +227,26 @@ public sealed class FileBatchSpoolTests : IDisposable
 
         var path = Directory.GetFiles(_directory, "*.json").Single();
 
-        // FileShare.Delete (not FileShare.None): this must block the read
-        // without also blocking the delete, or a would-be destructive delete
-        // fails for the same reason the read did and the test cannot tell
-        // "did not delete" apart from "could not delete."
-        using (new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Delete))
+        // Making a read fail also takes a different lever per platform. Share
+        // modes are enforced by Windows but advisory on Unix, where an exclusive
+        // handle blocks nothing and the read would simply succeed — so on Unix
+        // the file's permissions are removed instead. Either way the delete must
+        // stay possible, or a would-be destructive delete fails for the same
+        // reason the read did and the test cannot tell "did not delete" apart
+        // from "could not delete": on Windows that is FileShare.Delete rather
+        // than FileShare.None, and on Unix it is the directory staying writable.
+        if (OperatingSystem.IsWindows())
         {
+            using (new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Delete))
+            {
+                Assert.False(spool.TryTakeOldest(out _));
+            }
+        }
+        else
+        {
+            File.SetUnixFileMode(path, UnixFileMode.None);
             Assert.False(spool.TryTakeOldest(out _));
+            File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
         }
 
         Assert.True(File.Exists(path));
