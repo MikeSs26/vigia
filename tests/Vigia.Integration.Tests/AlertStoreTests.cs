@@ -169,6 +169,92 @@ public class AlertStoreTests(PostgresFixture postgres)
     }
 
     [Fact]
+    public async Task AFailureWritingTheOutboxRollsBackTheStateChange()
+    {
+        // The promise this whole class exists for. `payload` is a jsonb column, so
+        // text that is not JSON is refused by PostgreSQL — and the refusal lands
+        // AFTER the instance has been flushed inside the transaction, which is
+        // exactly the window a two-transaction implementation would leak through.
+        var (ruleId, sourceId, channelId) = await SeedRuleAsync(withChannel: true);
+
+        await Assert.ThrowsAnyAsync<Exception>(() => Store().CommitAsync(new CommitRequest(
+            ruleId, sourceId,
+            new AlertInstanceState(AlertState.Firing, Anchor, 90.0),
+            Anchor,
+            new AlertTransition(AlertState.Pending, AlertState.Firing, Anchor, 90.0),
+            SuppressedReason: null,
+            ChannelId: channelId,
+            Payload: "this is not json"), default));
+
+        await using var context = postgres.CreateContext();
+
+        // Nothing survived: not the instance, not the event, not the outbox row.
+        Assert.False(await context.AlertInstances.AnyAsync(i => i.RuleId == ruleId));
+        Assert.Equal(0, await context.Outbox.CountAsync(m => m.ChannelId == channelId));
+    }
+
+    [Fact]
+    public async Task ARuleWithNoSourceProducesOneTargetPerSourceOfItsTenant()
+    {
+        // What makes NoData useful across a fleet: adding a host must not require
+        // editing rules.
+        await using var context = postgres.CreateContext();
+
+        var tenant = new Tenant { Name = "F", Slug = $"f-{Guid.NewGuid():N}", CreatedAt = Anchor };
+        context.Tenants.Add(tenant);
+        await context.SaveChangesAsync();
+
+        var first = new Source
+        {
+            TenantId = tenant.Id, Name = $"h-{Guid.NewGuid():N}", Kind = SourceKind.Host,
+        };
+        var second = new Source
+        {
+            TenantId = tenant.Id, Name = $"h-{Guid.NewGuid():N}", Kind = SourceKind.Host,
+        };
+        context.Sources.AddRange(first, second);
+        await context.SaveChangesAsync();
+
+        var rule = new AlertRuleEntity
+        {
+            TenantId = tenant.Id,
+            SourceId = null,
+            MetricName = "cpu.usage",
+            Aggregation = RuleAggregation.Avg,
+            WindowSeconds = 300,
+            Operator = ComparisonOperator.Gt,
+            Threshold = 85,
+            ForSeconds = 300,
+            NoDataAfterSeconds = 120,
+            Severity = Severity.Warning,
+            CooldownSeconds = 1800,
+            Enabled = true,
+        };
+        context.AlertRules.Add(rule);
+        await context.SaveChangesAsync();
+
+        var targets = (await Store().LoadTargetsAsync(Anchor, default))
+            .Where(t => t.Rule.Id == rule.Id)
+            .ToList();
+
+        Assert.Equal(2, targets.Count);
+        Assert.Contains(targets, t => t.SourceId == first.Id);
+        Assert.Contains(targets, t => t.SourceId == second.Id);
+    }
+
+    [Fact]
+    public async Task AChannelThatNoLongerExistsLoadsAsDisabledRatherThanThrowing()
+    {
+        // There is no foreign key from alert_rules.channel_id to
+        // notification_channels, so a rule pointing at a deleted channel is
+        // reachable state. Throwing here would take the alert worker down on
+        // every cycle, every 30 seconds, for one stale row.
+        var channel = await Store().LoadChannelAsync(int.MaxValue, default);
+
+        Assert.False(channel.Enabled);
+    }
+
+    [Fact]
     public async Task CommittingTwiceForTheSameInstanceUpdatesRatherThanDuplicates()
     {
         var (ruleId, sourceId, _) = await SeedRuleAsync();
