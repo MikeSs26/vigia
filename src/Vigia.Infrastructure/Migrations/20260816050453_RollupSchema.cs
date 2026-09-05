@@ -14,6 +14,13 @@ namespace Vigia.Infrastructure.Migrations
             // re-aggregatable: the 1h table is computed from the 1m table without
             // returning to raw data, and averages are derived at read time. Storing
             // an average would make the hourly table uncomputable from the minutely one.
+            // The foreign key below takes ShareRowExclusiveLock on metric_series,
+            // which conflicts with the RowExclusiveLock ingestion takes to register
+            // a new series. That wait is sub-second in practice, but the deploy
+            // gates the API on this migration completing, so without a timeout an
+            // unlucky lock would hang the deployment instead of failing it.
+            migrationBuilder.Sql("SET lock_timeout = '5s';");
+
             foreach (var table in new[] { "metric_rollups_1m", "metric_rollups_1h" })
             {
                 migrationBuilder.Sql($"""

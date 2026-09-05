@@ -68,6 +68,10 @@ public class RollupWorkerTests(PostgresFixture postgres) : IAsyncLifetime
             time,
             NullLogger<RollupWorker>.Instance);
 
+    private async Task<DateTimeOffset?> WatermarkAsync(string granularityKey) =>
+        await new PostgresRollupWatermarkStore(postgres.ConnectionString)
+            .ReadAsync(granularityKey, default);
+
     /// <summary>
     /// Pins where this test's worker starts. Cold-start seeding reads the oldest
     /// raw point in the whole table, and the suite's other fixtures write points
@@ -198,6 +202,66 @@ public class RollupWorkerTests(PostgresFixture postgres) : IAsyncLifetime
         await InsertPointAsync(bucket.AddSeconds(40), 20.0);
 
         time.SetUtcNow(bucket.AddMinutes(2).AddSeconds(30));
+        await worker.RunCycleAsync(default);
+
+        await using var connection = await postgres.OpenConnectionAsync();
+        await using var command = new NpgsqlCommand(
+            "SELECT count FROM metric_rollups_1m WHERE series_id = @s AND bucket = @b;", connection);
+        command.Parameters.AddWithValue("s", _seriesId);
+        command.Parameters.AddWithValue("b", bucket.ToUniversalTime());
+
+        Assert.Equal(2, (int)(await command.ExecuteScalarAsync())!);
+    }
+
+    [Fact]
+    public async Task TheHourWatermarkNeverOutrunsTheMinutesItIsComputedFrom()
+    {
+        // Hours are aggregated from the minute table, and the two passes are capped
+        // at wildly different rates (1,440 minutes against 720 hours per cycle).
+        // Left unclamped, the hour pass reads minutes that have not been written
+        // yet, stores whatever fraction it finds, and marks those hours complete
+        // forever — wrong data, presented as correct, in the year-long archive.
+        await SeedWatermarksAsync(Anchor);
+
+        for (var i = 0; i < 5; i++)
+        {
+            await InsertPointAsync(Anchor.AddMinutes(i), 10.0 + i);
+        }
+
+        // Minutes may cover one hour per cycle; hours would otherwise jump five.
+        await Worker(new FakeTimeProvider(Anchor.AddHours(5)), maxMinuteBuckets: 60)
+            .RunCycleAsync(default);
+
+        var minutes = await WatermarkAsync(_minuteKey);
+        var hours = await WatermarkAsync(_hourKey);
+
+        Assert.NotNull(minutes);
+        Assert.NotNull(hours);
+        Assert.True(
+            hours <= minutes,
+            $"hour watermark {hours:o} claims hours the minute watermark {minutes:o} has not reached");
+    }
+
+    [Fact]
+    public async Task APointArrivingLongAfterItsBucketIsStillAggregated()
+    {
+        // The agent spools through an outage and replays one batch per tick, so a
+        // point can commit an hour or more behind the watermark. A one-bucket
+        // trailing window let every such point fall straight through the rollups
+        // and vanish when its raw partition expired — silently negating the spool.
+        var bucket = Anchor.AddMinutes(1);
+
+        await SeedWatermarksAsync(Anchor);
+        await InsertPointAsync(bucket.AddSeconds(1), 10.0);
+
+        var time = new FakeTimeProvider(Anchor.AddMinutes(90));
+        var worker = Worker(time);
+        await worker.RunCycleAsync(default);
+
+        // Replayed from the spool an hour and a half after it was measured.
+        await InsertPointAsync(bucket.AddSeconds(40), 20.0);
+
+        time.SetUtcNow(Anchor.AddMinutes(91));
         await worker.RunCycleAsync(default);
 
         await using var connection = await postgres.OpenConnectionAsync();

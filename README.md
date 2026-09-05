@@ -144,9 +144,21 @@ data, and averages are derived at read time.
 
 The worker records how far it has aggregated in a persisted watermark, so a cold start
 against a database that already holds history aggregates it rather than skipping it, and a
-restart after an outage resumes instead of leaving a permanent hole. Each cycle also
-recomputes the newest completed bucket, absorbing points that arrive moments late; the
-upsert is idempotent, so recomputing a range is indistinguishable from computing it once.
+restart after an outage resumes instead of leaving a permanent hole.
+
+Each cycle also recomputes a trailing two-hour window rather than only the newest bucket,
+because points do not always arrive in order: the agent's spool replays batches long after
+the measurements in them were taken, and a point that lands behind the watermark enters the
+aggregates only if that window still covers it. Anything arriving later than the window is
+queryable as raw data but never reaches the rollups, and is therefore gone once its raw
+partition expires. Two hours is the trade: it covers a realistic outage at the cost of one
+extra scan of a small, recent range each cycle. The upsert is idempotent, so recomputing a
+range is indistinguishable from computing it once.
+
+The hourly pass never advances past the minutes it is computed from. The two passes are
+capped at different rates, and without that clamp a long backlog would let the hourly pass
+read minutes that had not been written yet, store the fraction it found, and mark those
+hours complete permanently.
 
 ### The agent
 

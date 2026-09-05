@@ -44,50 +44,63 @@ public sealed class RollupWorker(
     {
         var now = timeProvider.GetUtcNow();
 
+        var hour = TimeSpan.FromHours(1);
+
         // Minutes first: the hour aggregation reads the minute table, so the other
-        // order would compute hours from minutes that are one cycle stale.
-        await AdvanceAsync(
+        // order would compute hours from minutes that are one cycle stale. Both
+        // targets are floored because the bucket currently in progress is never
+        // written: it is not finished, so any value computed for it would be wrong.
+        var minuteWatermark = await AdvanceAsync(
             _options.MinuteGranularityKey,
             TimeSpan.FromMinutes(1),
             _options.MaxMinuteBucketsPerCycle,
+            _options.TrailingMinuteBuckets,
+            Floor(now, TimeSpan.FromMinutes(1)),
             now,
             aggregator.AggregateMinutesAsync,
             cancellationToken);
 
+        // Hours are computed FROM the minute table, and the two passes are capped
+        // at very different rates: 1,440 minutes against 720 hours. Clamping the
+        // hour target to the minutes that actually exist is what stops the hour
+        // pass, on any backlog longer than its minute counterpart can cover in one
+        // cycle, from reading hours the minute pass has not written, storing the
+        // fraction it finds, and marking them complete forever.
         await AdvanceAsync(
             _options.HourGranularityKey,
-            TimeSpan.FromHours(1),
+            hour,
             _options.MaxHourBucketsPerCycle,
+            _options.TrailingHourBuckets,
+            Min(Floor(now, hour), Floor(minuteWatermark, hour)),
             now,
             aggregator.AggregateHoursAsync,
             cancellationToken);
     }
 
-    private async Task AdvanceAsync(
+    private async Task<DateTimeOffset> AdvanceAsync(
         string granularityKey,
         TimeSpan bucket,
         int maxBuckets,
+        int trailingBuckets,
+        DateTimeOffset target,
         DateTimeOffset now,
         Func<DateTimeOffset, DateTimeOffset, CancellationToken, Task<int>> aggregate,
         CancellationToken cancellationToken)
     {
-        // The bucket currently in progress is never written: it is not finished,
-        // so any value computed for it would be wrong until it is.
-        var target = Floor(now, bucket);
-
         var watermark = await watermarks.ReadAsync(granularityKey, cancellationToken)
                         ?? await SeedAsync(granularityKey, bucket, target, cancellationToken);
 
         if (watermark >= target)
         {
-            return;
+            return watermark;
         }
 
-        // Start one bucket behind so the newest completed bucket is recomputed.
-        // The upsert makes that free, and it is what absorbs points that landed
-        // after the bucket was first written.
-        var from = watermark - (bucket * _options.TrailingBuckets);
-        var to = Min(from + (bucket * (maxBuckets + _options.TrailingBuckets)), target);
+        // Start a window behind so already-written buckets are recomputed. The
+        // upsert makes that free in correctness, and it is what absorbs points
+        // that committed after their bucket was first written — the spool replays
+        // batches long after the measurements in them were taken.
+        var from = watermark - (bucket * trailingBuckets);
+        var to = Min(from + (bucket * (maxBuckets + trailingBuckets)), target);
 
         var written = await aggregate(from, to, cancellationToken);
 
@@ -101,6 +114,8 @@ public sealed class RollupWorker(
                 "Rolled up {Rows} {Granularity} buckets covering {From:o} to {To:o}",
                 written, granularityKey, from, to);
         }
+
+        return to;
     }
 
     private async Task<DateTimeOffset> SeedAsync(

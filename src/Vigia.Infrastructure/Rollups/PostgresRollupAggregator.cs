@@ -7,10 +7,16 @@ public sealed class PostgresRollupAggregator(string connectionString) : IRollupA
     // date_bin is native to PostgreSQL 14+ and maps one-to-one onto a time-series
     // extension's time_bucket, so replacing it later is a textual substitution in
     // this one file.
+    //
+    // The origin carries an explicit +00 offset because a bare timestamptz literal
+    // is parsed in the session's TimeZone: under a half-hour zone such as
+    // Asia/Kolkata the hourly bins would silently land at :30 past the hour. The
+    // deployment runs UTC, so this pins a property it already has rather than
+    // fixing a live defect.
     private const string MinuteSql = """
         INSERT INTO metric_rollups_1m (series_id, bucket, count, sum, min, max, last)
         SELECT series_id,
-               date_bin('1 minute', ts, timestamptz '2000-01-01'),
+               date_bin('1 minute', ts, timestamptz '2000-01-01 00:00:00+00'),
                count(*), sum(value), min(value), max(value),
                (array_agg(value ORDER BY ts DESC))[1]
         FROM metric_points
@@ -26,7 +32,7 @@ public sealed class PostgresRollupAggregator(string connectionString) : IRollupA
     private const string HourSql = """
         INSERT INTO metric_rollups_1h (series_id, bucket, count, sum, min, max, last)
         SELECT series_id,
-               date_bin('1 hour', bucket, timestamptz '2000-01-01'),
+               date_bin('1 hour', bucket, timestamptz '2000-01-01 00:00:00+00'),
                sum(count)::int, sum(sum), min(min), max(max),
                (array_agg(last ORDER BY bucket DESC))[1]
         FROM metric_rollups_1m
