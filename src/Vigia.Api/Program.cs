@@ -12,7 +12,9 @@ using Vigia.Api.Workers;
 using Vigia.Core;
 using Vigia.Core.Querying;
 using Vigia.Infrastructure;
+using Vigia.Infrastructure.Alerting;
 using Vigia.Infrastructure.Auth;
+using Vigia.Infrastructure.Notifications;
 using Vigia.Infrastructure.Partitions;
 using Vigia.Infrastructure.Querying;
 using Vigia.Infrastructure.Rollups;
@@ -39,6 +41,10 @@ builder.Services.Configure<RateLimitingOptions>(
     builder.Configuration.GetSection(RateLimitingOptions.SectionName));
 builder.Services.Configure<RollupOptions>(
     builder.Configuration.GetSection(RollupOptions.SectionName));
+builder.Services.Configure<AlertOptions>(
+    builder.Configuration.GetSection(AlertOptions.SectionName));
+builder.Services.Configure<NotifierOptions>(
+    builder.Configuration.GetSection(NotifierOptions.SectionName));
 builder.Services.AddVigiaRateLimiting();
 
 builder.Services.AddSingleton<IMetricQueue, BoundedChannelMetricQueue>();
@@ -57,12 +63,29 @@ builder.Services.AddSingleton<IRollupWatermarkStore>(
 builder.Services.AddSingleton<IRollupAggregator>(
     _ => new PostgresRollupAggregator(connectionString));
 
+builder.Services.AddSingleton<IAlertStore>(_ => new PostgresAlertStore(connectionString));
+builder.Services.AddSingleton<IOutboxStore>(_ => new PostgresOutboxStore(connectionString));
+builder.Services.AddHttpClient<IWebhookPublisher, DiscordWebhookPublisher>(client =>
+{
+    // A hung webhook must not hold a drain cycle open.
+    client.Timeout = TimeSpan.FromSeconds(10);
+})
+    // IHttpClientFactory's default logging handlers write the full request URI at
+    // Information. For this client the URI *is* the credential: whoever holds the
+    // Discord webhook URL can post to the channel. The whole design keeps it out of
+    // the database and out of source control, so it must not land in stdout either,
+    // which Docker captures and retains. Removing the loggers here is scoped to this
+    // client and survives someone raising log levels elsewhere.
+    .RemoveAllLoggers();
+
 builder.Services.AddScoped<IApiKeyLookup, ApiKeyLookup>();
 builder.Services.AddScoped<IValidator<IngestRequest>, IngestRequestValidator>();
 
 builder.Services.AddHostedService<IngestionWorker>();
 builder.Services.AddHostedService<MaintenanceWorker>();
 builder.Services.AddHostedService<RollupWorker>();
+builder.Services.AddHostedService<AlertWorker>();
+builder.Services.AddHostedService<NotifierWorker>();
 
 builder.Services
     .AddAuthentication(ApiKeyDefaults.Scheme)
