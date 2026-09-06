@@ -31,8 +31,11 @@ public class AlertStoreTests(PostgresFixture postgres)
         {
             var channel = new NotificationChannelEntity
             {
-                TenantId = tenant.Id, Kind = "discord_webhook",
-                Name = $"c-{Guid.NewGuid():N}", MinSeverity = Severity.Info, Enabled = true,
+                TenantId = tenant.Id,
+                Kind = "discord_webhook",
+                Name = $"c-{Guid.NewGuid():N}",
+                MinSeverity = Severity.Info,
+                Enabled = true,
             };
 
             context.NotificationChannels.Add(channel);
@@ -42,7 +45,9 @@ public class AlertStoreTests(PostgresFixture postgres)
 
         var source = new Source
         {
-            TenantId = tenant.Id, Name = $"h-{Guid.NewGuid():N}", Kind = SourceKind.Host,
+            TenantId = tenant.Id,
+            Name = $"h-{Guid.NewGuid():N}",
+            Kind = SourceKind.Host,
         };
         context.Sources.Add(source);
         await context.SaveChangesAsync();
@@ -206,11 +211,15 @@ public class AlertStoreTests(PostgresFixture postgres)
 
         var first = new Source
         {
-            TenantId = tenant.Id, Name = $"h-{Guid.NewGuid():N}", Kind = SourceKind.Host,
+            TenantId = tenant.Id,
+            Name = $"h-{Guid.NewGuid():N}",
+            Kind = SourceKind.Host,
         };
         var second = new Source
         {
-            TenantId = tenant.Id, Name = $"h-{Guid.NewGuid():N}", Kind = SourceKind.Host,
+            TenantId = tenant.Id,
+            Name = $"h-{Guid.NewGuid():N}",
+            Kind = SourceKind.Host,
         };
         context.Sources.AddRange(first, second);
         await context.SaveChangesAsync();
@@ -285,13 +294,20 @@ public class AlertStoreTests(PostgresFixture postgres)
             context.Silences.AddRange(
                 new SilenceEntity
                 {
-                    TenantId = tenant.Id, TargetKind = SilenceTarget.Global,
-                    Until = Anchor.AddHours(1), Reason = "live", CreatedBy = "cli",
+                    TenantId = tenant.Id,
+                    TargetKind = SilenceTarget.Global,
+                    Until = Anchor.AddHours(1),
+                    Reason = "live",
+                    CreatedBy = "cli",
                 },
                 new SilenceEntity
                 {
-                    TenantId = tenant.Id, TargetKind = SilenceTarget.Rule, TargetId = 1,
-                    Until = Anchor.AddHours(-1), Reason = "expired", CreatedBy = "cli",
+                    TenantId = tenant.Id,
+                    TargetKind = SilenceTarget.Rule,
+                    TargetId = 1,
+                    Until = Anchor.AddHours(-1),
+                    Reason = "expired",
+                    CreatedBy = "cli",
                 });
             await context.SaveChangesAsync();
         }

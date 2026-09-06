@@ -40,16 +40,22 @@ public class NotifierWorkerTests(PostgresFixture postgres)
 
         var channel = new NotificationChannelEntity
         {
-            TenantId = tenant.Id, Kind = "discord_webhook", Name = "ops",
-            MinSeverity = Vigia.Core.Alerting.Severity.Info, Enabled = true,
+            TenantId = tenant.Id,
+            Kind = "discord_webhook",
+            Name = "ops",
+            MinSeverity = Vigia.Core.Alerting.Severity.Info,
+            Enabled = true,
         };
         context.NotificationChannels.Add(channel);
         await context.SaveChangesAsync();
 
         var message = new OutboxMessage
         {
-            ChannelId = channel.Id, Payload = """{"content":"x"}""",
-            CreatedAt = Anchor, Attempts = 0, NextAttemptAt = Anchor,
+            ChannelId = channel.Id,
+            Payload = """{"content":"x"}""",
+            CreatedAt = Anchor,
+            Attempts = 0,
+            NextAttemptAt = Anchor,
         };
         context.Outbox.Add(message);
         await context.SaveChangesAsync();

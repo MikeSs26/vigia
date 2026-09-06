@@ -21,22 +21,29 @@ public static class AlertingFixture
 
         var tenant = new Tenant
         {
-            Name = "Alerting", Slug = $"al-{Guid.NewGuid():N}", CreatedAt = anchor,
+            Name = "Alerting",
+            Slug = $"al-{Guid.NewGuid():N}",
+            CreatedAt = anchor,
         };
         context.Tenants.Add(tenant);
         await context.SaveChangesAsync();
 
         var source = new Source
         {
-            TenantId = tenant.Id, Name = $"h-{Guid.NewGuid():N}", Kind = SourceKind.Host,
+            TenantId = tenant.Id,
+            Name = $"h-{Guid.NewGuid():N}",
+            Kind = SourceKind.Host,
         };
         context.Sources.Add(source);
         await context.SaveChangesAsync();
 
         var channel = new NotificationChannelEntity
         {
-            TenantId = tenant.Id, Kind = "discord_webhook", Name = "ops",
-            MinSeverity = Severity.Info, Enabled = true,
+            TenantId = tenant.Id,
+            Kind = "discord_webhook",
+            Name = "ops",
+            MinSeverity = Severity.Info,
+            Enabled = true,
         };
         context.NotificationChannels.Add(channel);
         await context.SaveChangesAsync();

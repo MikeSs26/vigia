@@ -90,17 +90,17 @@ public static class CliRunner
             // Without it a rule targets every source of the tenant.
             case ["create-rule", var tenant, var metric, var agg, var window, var op,
                   var threshold, var forSecs, var noData, var sev, var cooldown, var source]:
-            {
-                if (!int.TryParse(source, out var ruleSourceId))
                 {
-                    stderr.WriteLine($"Invalid source id '{source}': expected an integer.");
-                    return 1;
-                }
+                    if (!int.TryParse(source, out var ruleSourceId))
+                    {
+                        stderr.WriteLine($"Invalid source id '{source}': expected an integer.");
+                        return 1;
+                    }
 
-                return await CreateRuleAsync(
-                    context, tenant, metric, agg, window, op, threshold, forSecs, noData,
-                    sev, cooldown, ruleSourceId, stdout, stderr, cancellationToken);
-            }
+                    return await CreateRuleAsync(
+                        context, tenant, metric, agg, window, op, threshold, forSecs, noData,
+                        sev, cooldown, ruleSourceId, stdout, stderr, cancellationToken);
+                }
 
             case ["create-rule", var tenant, var metric, var agg, var window, var op,
                   var threshold, var forSecs, var noData, var sev, var cooldown]:
@@ -109,32 +109,32 @@ public static class CliRunner
                     sev, cooldown, null, stdout, stderr, cancellationToken);
 
             case ["assign-channel", var rule, var channel]:
-            {
-                if (!int.TryParse(rule, out var assignRuleId))
                 {
-                    stderr.WriteLine($"Invalid rule id '{rule}': expected an integer.");
-                    return 1;
+                    if (!int.TryParse(rule, out var assignRuleId))
+                    {
+                        stderr.WriteLine($"Invalid rule id '{rule}': expected an integer.");
+                        return 1;
+                    }
+
+                    if (!int.TryParse(channel, out var assignChannelId))
+                    {
+                        stderr.WriteLine($"Invalid channel id '{channel}': expected an integer.");
+                        return 1;
+                    }
+
+                    var assigned = await AdminCommands.AssignChannelAsync(
+                        context, assignRuleId, assignChannelId, cancellationToken);
+
+                    if (!assigned)
+                    {
+                        stderr.WriteLine(
+                            $"No rule {assignRuleId} with a channel {assignChannelId} in its own tenant.");
+                        return 1;
+                    }
+
+                    stdout.WriteLine($"rule {assignRuleId} now delivers to channel {assignChannelId}");
+                    return 0;
                 }
-
-                if (!int.TryParse(channel, out var assignChannelId))
-                {
-                    stderr.WriteLine($"Invalid channel id '{channel}': expected an integer.");
-                    return 1;
-                }
-
-                var assigned = await AdminCommands.AssignChannelAsync(
-                    context, assignRuleId, assignChannelId, cancellationToken);
-
-                if (!assigned)
-                {
-                    stderr.WriteLine(
-                        $"No rule {assignRuleId} with a channel {assignChannelId} in its own tenant.");
-                    return 1;
-                }
-
-                stdout.WriteLine($"rule {assignRuleId} now delivers to channel {assignChannelId}");
-                return 0;
-            }
 
             case ["mute", var tenant, var minutes, var reason]:
                 return await CreateSilenceAsync(
@@ -142,38 +142,38 @@ public static class CliRunner
                     stdout, stderr, cancellationToken);
 
             case ["silence", var tenant, var kind, var targetId, var minutes, var reason]:
-            {
-                if (!Enum.TryParse<SilenceTarget>(kind, ignoreCase: true, out var target)
-                    || target == SilenceTarget.Global)
                 {
-                    stderr.WriteLine("Silence target must be 'rule' or 'source'; use 'mute' for global.");
-                    return 1;
-                }
+                    if (!Enum.TryParse<SilenceTarget>(kind, ignoreCase: true, out var target)
+                        || target == SilenceTarget.Global)
+                    {
+                        stderr.WriteLine("Silence target must be 'rule' or 'source'; use 'mute' for global.");
+                        return 1;
+                    }
 
-                if (!int.TryParse(targetId, out var parsedTargetId))
-                {
-                    stderr.WriteLine($"Invalid target id '{targetId}': expected an integer.");
-                    return 1;
-                }
+                    if (!int.TryParse(targetId, out var parsedTargetId))
+                    {
+                        stderr.WriteLine($"Invalid target id '{targetId}': expected an integer.");
+                        return 1;
+                    }
 
-                return await CreateSilenceAsync(
-                    context, tenant, target, parsedTargetId, minutes, reason, now,
-                    stdout, stderr, cancellationToken);
-            }
+                    return await CreateSilenceAsync(
+                        context, tenant, target, parsedTargetId, minutes, reason, now,
+                        stdout, stderr, cancellationToken);
+                }
 
             case ["unsilence", var tenant]:
-            {
-                if (!int.TryParse(tenant, out var unsilenceTenantId))
                 {
-                    stderr.WriteLine($"Invalid tenant id '{tenant}': expected an integer.");
-                    return 1;
-                }
+                    if (!int.TryParse(tenant, out var unsilenceTenantId))
+                    {
+                        stderr.WriteLine($"Invalid tenant id '{tenant}': expected an integer.");
+                        return 1;
+                    }
 
-                var lifted = await AdminCommands.UnsilenceAsync(
-                    context, unsilenceTenantId, now, cancellationToken);
-                stdout.WriteLine($"{lifted} silence(s) lifted");
-                return 0;
-            }
+                    var lifted = await AdminCommands.UnsilenceAsync(
+                        context, unsilenceTenantId, now, cancellationToken);
+                    stdout.WriteLine($"{lifted} silence(s) lifted");
+                    return 0;
+                }
 
             default:
                 stderr.WriteLine("""
