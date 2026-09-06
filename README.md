@@ -160,6 +160,33 @@ capped at different rates, and without that clamp a long backlog would let the h
 read minutes that had not been written yet, store the fraction it found, and mark those
 hours complete permanently.
 
+### Alerting
+
+A rule reads `aggregation(metric, window) operator threshold for duration` — for example
+`avg cpu.usage over 300s > 85 for 300s`. Crossing the threshold enters `Pending` and
+notifies nothing; only holding it for the full duration fires. A spike from a build or a
+backup therefore never reaches the channel.
+
+`NoData` matters more than any threshold: a dead host does not emit a "host is down"
+metric, it stops emitting, and without that state a dead server is indistinguishable from
+an idle one.
+
+Rules are evaluated against raw points rather than the rollups, so the alert engine cannot
+be wrong because the rollup worker is catching up. Windows are capped at 6 hours to keep
+every alert query inside the raw retention horizon.
+
+Notification is never periodic — only a state transition produces a message, so a metric
+pinned above its threshold for three days produces one message when it starts and one when
+it recovers. A new rule is created with no channel and delivers nothing until one is
+assigned. Delivery is suppressed by a global kill switch, an expiring silence on a rule or
+a source, a channel's minimum severity, or the rule's cooldown; whichever applied is
+recorded with the event.
+
+Alert evaluation never calls Discord. The message is written to an outbox in the same
+transaction as the state change, and a separate worker drains it with exponential backoff.
+An unreachable Discord accumulates messages and delivers them on recovery instead of
+leaving an alert recorded as sent that never was.
+
 ### The agent
 
 The agent reports `cpu.usage`, `memory.used_percent`, `memory.available_bytes`,

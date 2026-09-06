@@ -12,7 +12,9 @@ using Vigia.Api.Workers;
 using Vigia.Core;
 using Vigia.Core.Querying;
 using Vigia.Infrastructure;
+using Vigia.Infrastructure.Alerting;
 using Vigia.Infrastructure.Auth;
+using Vigia.Infrastructure.Notifications;
 using Vigia.Infrastructure.Partitions;
 using Vigia.Infrastructure.Querying;
 using Vigia.Infrastructure.Rollups;
@@ -39,6 +41,10 @@ builder.Services.Configure<RateLimitingOptions>(
     builder.Configuration.GetSection(RateLimitingOptions.SectionName));
 builder.Services.Configure<RollupOptions>(
     builder.Configuration.GetSection(RollupOptions.SectionName));
+builder.Services.Configure<AlertOptions>(
+    builder.Configuration.GetSection(AlertOptions.SectionName));
+builder.Services.Configure<NotifierOptions>(
+    builder.Configuration.GetSection(NotifierOptions.SectionName));
 builder.Services.AddVigiaRateLimiting();
 
 builder.Services.AddSingleton<IMetricQueue, BoundedChannelMetricQueue>();
@@ -57,12 +63,22 @@ builder.Services.AddSingleton<IRollupWatermarkStore>(
 builder.Services.AddSingleton<IRollupAggregator>(
     _ => new PostgresRollupAggregator(connectionString));
 
+builder.Services.AddSingleton<IAlertStore>(_ => new PostgresAlertStore(connectionString));
+builder.Services.AddSingleton<IOutboxStore>(_ => new PostgresOutboxStore(connectionString));
+builder.Services.AddHttpClient<IWebhookPublisher, DiscordWebhookPublisher>(client =>
+{
+    // A hung webhook must not hold a drain cycle open.
+    client.Timeout = TimeSpan.FromSeconds(10);
+});
+
 builder.Services.AddScoped<IApiKeyLookup, ApiKeyLookup>();
 builder.Services.AddScoped<IValidator<IngestRequest>, IngestRequestValidator>();
 
 builder.Services.AddHostedService<IngestionWorker>();
 builder.Services.AddHostedService<MaintenanceWorker>();
 builder.Services.AddHostedService<RollupWorker>();
+builder.Services.AddHostedService<AlertWorker>();
+builder.Services.AddHostedService<NotifierWorker>();
 
 builder.Services
     .AddAuthentication(ApiKeyDefaults.Scheme)
