@@ -140,6 +140,79 @@ public class NotifierWorkerTests(PostgresFixture postgres)
     }
 
     [Fact]
+    public async Task ABackedOffMessageIsNotRetriedOnTheNextCycleAtTheSameInstant()
+    {
+        // Backoff only means anything if the claim honours it. Without the
+        // due-date predicate the drain would hammer a failing webhook on every
+        // cycle instead of waiting out the delay it had just set for itself.
+        var (_, messageId) = await SeedMessageAsync();
+
+        var publisher = new StubPublisher(PublishOutcome.Retry);
+        var worker = Worker(publisher, new FakeTimeProvider(Anchor));
+
+        await worker.RunCycleAsync(default);
+        Assert.Equal(1, publisher.Calls);
+
+        // Same instant, and the message is now scheduled into the future.
+        await worker.RunCycleAsync(default);
+
+        Assert.Equal(1, publisher.Calls);
+
+        await using var context = postgres.CreateContext();
+        var message = await context.Outbox.SingleAsync(m => m.Id == messageId);
+
+        Assert.Equal(1, message.Attempts);
+    }
+
+    [Fact]
+    public async Task TheOutboxBoundNeverDropsDeliveredHistory()
+    {
+        // The bound exists to stop UNDELIVERED messages filling the disk during an
+        // outage. Delivered rows are the record of what was actually sent, and a
+        // trim that reached them would erase that record to make room.
+        var (channelId, _) = await SeedMessageAsync();
+
+        long deliveredId;
+        await using (var setup = postgres.CreateContext())
+        {
+            var delivered = new OutboxMessage
+            {
+                ChannelId = channelId,
+                Payload = """{"content":"already sent"}""",
+                CreatedAt = Anchor.AddYears(-1),
+                Attempts = 1,
+                NextAttemptAt = Anchor,
+                SentAt = Anchor,
+            };
+            setup.Outbox.Add(delivered);
+
+            for (var i = 1; i <= 9; i++)
+            {
+                setup.Outbox.Add(new OutboxMessage
+                {
+                    ChannelId = channelId,
+                    Payload = $$"""{"content":"{{i}}"}""",
+                    CreatedAt = Anchor.AddMinutes(i),
+                    Attempts = 0,
+                    NextAttemptAt = Anchor.AddYears(1),
+                });
+            }
+
+            await setup.SaveChangesAsync();
+            deliveredId = delivered.Id;
+        }
+
+        await Worker(new StubPublisher(PublishOutcome.Retry), new FakeTimeProvider(Anchor))
+            .RunCycleAsync(default);
+
+        await using var context = postgres.CreateContext();
+
+        // It is by far the oldest row in the table, so a trim that ignored
+        // delivery status would take it first.
+        Assert.True(await context.Outbox.AnyAsync(m => m.Id == deliveredId));
+    }
+
+    [Fact]
     public async Task AMessageWhoseChannelWasDeletedFailsLoudlyInsteadOfVanishing()
     {
         // There is no foreign key from notification_outbox.channel_id to
