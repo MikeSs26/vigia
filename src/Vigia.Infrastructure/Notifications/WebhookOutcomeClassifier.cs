@@ -16,7 +16,14 @@ public static class WebhookOutcomeClassifier
             or HttpStatusCode.MethodNotAllowed
             or HttpStatusCode.RequestEntityTooLarge => PublishOutcome.Rejected,
 
-        // 429, 5xx and anything unrecognised: keeping the message costs a retry,
+        // Not Retry. 429 says "not now", not "this message failed" — it carries no
+        // information about the message at all. Spending an attempt on it means a
+        // backlog drain, which necessarily outruns Discord's per-webhook limit,
+        // rate-limits itself into the attempt cap and then destroys the alerts it
+        // was recovering. The outbox size bound is what still stops unbounded growth.
+        HttpStatusCode.TooManyRequests => PublishOutcome.RateLimited,
+
+        // 5xx and anything unrecognised: keeping the message costs a retry,
         // discarding it costs the incident.
         _ => PublishOutcome.Retry,
     };

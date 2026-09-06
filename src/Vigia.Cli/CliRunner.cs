@@ -86,58 +86,53 @@ public static class CliRunner
                 stderr.WriteLine($"Set the webhook URL in the environment as Notifier__ChannelWebhooks__{channelName}.");
                 return 0;
 
+            // The optional twelfth argument scopes the rule to a single source.
+            // Without it a rule targets every source of the tenant.
+            case ["create-rule", var tenant, var metric, var agg, var window, var op,
+                  var threshold, var forSecs, var noData, var sev, var cooldown, var source]:
+            {
+                if (!int.TryParse(source, out var ruleSourceId))
+                {
+                    stderr.WriteLine($"Invalid source id '{source}': expected an integer.");
+                    return 1;
+                }
+
+                return await CreateRuleAsync(
+                    context, tenant, metric, agg, window, op, threshold, forSecs, noData,
+                    sev, cooldown, ruleSourceId, stdout, stderr, cancellationToken);
+            }
+
             case ["create-rule", var tenant, var metric, var agg, var window, var op,
                   var threshold, var forSecs, var noData, var sev, var cooldown]:
+                return await CreateRuleAsync(
+                    context, tenant, metric, agg, window, op, threshold, forSecs, noData,
+                    sev, cooldown, null, stdout, stderr, cancellationToken);
+
+            case ["assign-channel", var rule, var channel]:
             {
-                if (!int.TryParse(tenant, out var ruleTenantId))
+                if (!int.TryParse(rule, out var assignRuleId))
                 {
-                    stderr.WriteLine($"Invalid tenant id '{tenant}': expected an integer.");
+                    stderr.WriteLine($"Invalid rule id '{rule}': expected an integer.");
                     return 1;
                 }
 
-                if (!Enum.TryParse<RuleAggregation>(agg, ignoreCase: true, out var parsedAgg))
+                if (!int.TryParse(channel, out var assignChannelId))
                 {
-                    stderr.WriteLine($"Invalid aggregation '{agg}': expected one of {ValidValues<RuleAggregation>()}.");
+                    stderr.WriteLine($"Invalid channel id '{channel}': expected an integer.");
                     return 1;
                 }
 
-                if (!Enum.TryParse<ComparisonOperator>(op, ignoreCase: true, out var parsedOp))
+                var assigned = await AdminCommands.AssignChannelAsync(
+                    context, assignRuleId, assignChannelId, cancellationToken);
+
+                if (!assigned)
                 {
-                    stderr.WriteLine($"Invalid operator '{op}': expected one of {ValidValues<ComparisonOperator>()}.");
+                    stderr.WriteLine(
+                        $"No rule {assignRuleId} with a channel {assignChannelId} in its own tenant.");
                     return 1;
                 }
 
-                if (!Enum.TryParse<Severity>(sev, ignoreCase: true, out var parsedSeverity))
-                {
-                    stderr.WriteLine($"Invalid severity '{sev}': expected one of {ValidValues<Severity>()}.");
-                    return 1;
-                }
-
-                if (!int.TryParse(window, out var windowSeconds) || windowSeconds <= 0
-                    || !int.TryParse(forSecs, out var forSeconds) || forSeconds < 0
-                    || !int.TryParse(noData, out var noDataSeconds) || noDataSeconds <= 0
-                    || !int.TryParse(cooldown, out var cooldownSeconds) || cooldownSeconds < 0
-                    || !double.TryParse(threshold, out var parsedThreshold))
-                {
-                    stderr.WriteLine("Window, for, no-data and cooldown must be integers and threshold a number.");
-                    return 1;
-                }
-
-                // Alerts read raw points, so a window must stay inside the raw retention
-                // horizon. Refusing here is what keeps that guarantee.
-                if (windowSeconds > 6 * 60 * 60)
-                {
-                    stderr.WriteLine("A rule window may span at most 6 hours.");
-                    return 1;
-                }
-
-                var ruleId = await AdminCommands.CreateRuleAsync(
-                    context, ruleTenantId, metric, parsedAgg, windowSeconds, parsedOp,
-                    parsedThreshold, forSeconds, noDataSeconds, parsedSeverity,
-                    cooldownSeconds, cancellationToken);
-
-                stdout.WriteLine($"rule {ruleId} created");
-                stderr.WriteLine("The rule is silent: it has no channel until one is assigned.");
+                stdout.WriteLine($"rule {assignRuleId} now delivers to channel {assignChannelId}");
                 return 0;
             }
 
@@ -190,13 +185,82 @@ public static class CliRunner
                       create-channel <tenantId> <name> <info|warning|critical>
                       create-rule    <tenantId> <metric> <avg|min|max|last|p95|count> <windowSeconds>
                                      <gt|gte|lt|lte> <threshold> <forSeconds> <noDataAfterSeconds>
-                                     <info|warning|critical> <cooldownSeconds>
+                                     <info|warning|critical> <cooldownSeconds> [sourceId]
+                      assign-channel <ruleId> <channelId>
                       mute           <tenantId> <minutes> <reason>
                       silence        <tenantId> <rule|source> <targetId> <minutes> <reason>
                       unsilence      <tenantId>
                     """);
                 return 1;
         }
+    }
+
+    private static async Task<int> CreateRuleAsync(
+        VigiaDbContext context, string tenant, string metric, string agg, string window,
+        string op, string threshold, string forSecs, string noData, string sev,
+        string cooldown, int? sourceId,
+        TextWriter stdout, TextWriter stderr, CancellationToken cancellationToken)
+    {
+        if (!int.TryParse(tenant, out var ruleTenantId))
+        {
+            stderr.WriteLine($"Invalid tenant id '{tenant}': expected an integer.");
+            return 1;
+        }
+
+        if (!Enum.TryParse<RuleAggregation>(agg, ignoreCase: true, out var parsedAgg))
+        {
+            stderr.WriteLine($"Invalid aggregation '{agg}': expected one of {ValidValues<RuleAggregation>()}.");
+            return 1;
+        }
+
+        if (!Enum.TryParse<ComparisonOperator>(op, ignoreCase: true, out var parsedOp))
+        {
+            stderr.WriteLine($"Invalid operator '{op}': expected one of {ValidValues<ComparisonOperator>()}.");
+            return 1;
+        }
+
+        if (!Enum.TryParse<Severity>(sev, ignoreCase: true, out var parsedSeverity))
+        {
+            stderr.WriteLine($"Invalid severity '{sev}': expected one of {ValidValues<Severity>()}.");
+            return 1;
+        }
+
+        if (!int.TryParse(window, out var windowSeconds) || windowSeconds <= 0
+            || !int.TryParse(forSecs, out var forSeconds) || forSeconds < 0
+            || !int.TryParse(noData, out var noDataSeconds) || noDataSeconds <= 0
+            || !int.TryParse(cooldown, out var cooldownSeconds) || cooldownSeconds < 0
+            || !double.TryParse(threshold, out var parsedThreshold))
+        {
+            stderr.WriteLine("Window, for, no-data and cooldown must be integers and threshold a number.");
+            return 1;
+        }
+
+        // Alerts read raw points, so a window must stay inside the raw retention
+        // horizon. Refusing here is what keeps that guarantee.
+        if (windowSeconds > 6 * 60 * 60)
+        {
+            stderr.WriteLine("A rule window may span at most 6 hours.");
+            return 1;
+        }
+
+        // The same cap, for the same reason: the evaluator reads max(window, no-data)
+        // and clamps that read to 6 hours. Accepting a longer no-data here would
+        // create a rule that declares NoData at 6 hours whatever it says it does,
+        // and nothing would log the difference.
+        if (noDataSeconds > 6 * 60 * 60)
+        {
+            stderr.WriteLine("A rule's no-data horizon may span at most 6 hours.");
+            return 1;
+        }
+
+        var ruleId = await AdminCommands.CreateRuleAsync(
+            context, ruleTenantId, metric, parsedAgg, windowSeconds, parsedOp,
+            parsedThreshold, forSeconds, noDataSeconds, parsedSeverity,
+            cooldownSeconds, cancellationToken, sourceId);
+
+        stdout.WriteLine($"rule {ruleId} created");
+        stderr.WriteLine("The rule is silent: it has no channel until one is assigned.");
+        return 0;
     }
 
     private static async Task<int> CreateSilenceAsync(

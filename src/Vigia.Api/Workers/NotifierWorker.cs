@@ -41,12 +41,12 @@ public sealed class NotifierWorker(
     {
         var now = timeProvider.GetUtcNow();
 
-        var dropped = await store.TrimAsync(_options.MaxOutboxRows, cancellationToken);
+        var dropped = await store.TrimAsync(_options.MaxOutboxRows, now, cancellationToken);
 
         if (dropped > 0)
         {
             logger.LogWarning(
-                "Outbox exceeded {Max} undelivered rows; dropped the {Dropped} oldest",
+                "Outbox exceeded {Max} undelivered rows; marked the {Dropped} oldest failed",
                 _options.MaxOutboxRows, dropped);
         }
 
@@ -95,6 +95,18 @@ public sealed class NotifierWorker(
                     message.Id, attempts, now, "Permanently refused", cancellationToken);
                 break;
 
+            case PublishOutcome.RateLimited:
+                // Note the UNCHANGED attempt count. Being rate limited is not a
+                // failure of the message, so it must not consume the message's
+                // budget: a backlog drain outruns Discord's per-webhook limit by
+                // design, and charging those refusals would fail every alert in the
+                // queue during the outage the outbox exists to survive. What still
+                // bounds accumulation is the outbox size limit, not the attempt cap.
+                await store.MarkRetryAsync(
+                    message.Id, message.Attempts, now + RateLimitDelay,
+                    "Rate limited by Discord", cancellationToken);
+                break;
+
             default:
                 if (attempts >= _options.MaxAttempts)
                 {
@@ -110,6 +122,12 @@ public sealed class NotifierWorker(
                 break;
         }
     }
+
+    /// <summary>
+    /// Fixed, not exponential: a rate limit clears on a wall clock, and the attempt
+    /// count this backoff would key off deliberately does not move while it holds.
+    /// </summary>
+    private static readonly TimeSpan RateLimitDelay = TimeSpan.FromSeconds(60);
 
     /// <summary>Exponential, capped: 2s, 4s, 8s ... to a ceiling of 30 minutes.</summary>
     private static TimeSpan Backoff(int attempts)

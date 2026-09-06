@@ -90,18 +90,22 @@ public static class AdminCommands
 
     /// <summary>
     /// Creates a rule with no channel: recording and visible, delivering nothing.
-    /// Opting a rule into a channel is a separate, deliberate act.
+    /// Opting a rule into a channel is a separate, deliberate act — see
+    /// <see cref="AssignChannelAsync"/>.
+    ///
+    /// A null <paramref name="sourceId"/> targets every source of the tenant.
     /// </summary>
     public static async Task<int> CreateRuleAsync(
         VigiaDbContext context, int tenantId, string metricName,
         RuleAggregation aggregation, int windowSeconds, ComparisonOperator op,
         double threshold, int forSeconds, int noDataAfterSeconds,
-        Severity severity, int cooldownSeconds, CancellationToken cancellationToken)
+        Severity severity, int cooldownSeconds, CancellationToken cancellationToken,
+        int? sourceId = null)
     {
         var rule = new AlertRuleEntity
         {
             TenantId = tenantId,
-            SourceId = null,
+            SourceId = sourceId,
             MetricName = metricName,
             Aggregation = aggregation,
             WindowSeconds = windowSeconds,
@@ -119,6 +123,39 @@ public static class AdminCommands
         await context.SaveChangesAsync(cancellationToken);
 
         return rule.Id;
+    }
+
+    /// <summary>
+    /// Points a rule at a channel. Returns false when the rule does not exist, or
+    /// when the channel does not belong to the rule's tenant.
+    /// </summary>
+    public static async Task<bool> AssignChannelAsync(
+        VigiaDbContext context, int ruleId, int channelId, CancellationToken cancellationToken)
+    {
+        var rule = await context.AlertRules
+            .SingleOrDefaultAsync(r => r.Id == ruleId, cancellationToken);
+
+        if (rule is null)
+        {
+            return false;
+        }
+
+        // These tables carry no foreign keys, so the tenant match is enforced here
+        // or nowhere — and a rule pointing at another tenant's channel would
+        // deliver one tenant's incidents into another tenant's Discord.
+        var channel = await context.NotificationChannels
+            .SingleOrDefaultAsync(
+                c => c.Id == channelId && c.TenantId == rule.TenantId, cancellationToken);
+
+        if (channel is null)
+        {
+            return false;
+        }
+
+        rule.ChannelId = channelId;
+        await context.SaveChangesAsync(cancellationToken);
+
+        return true;
     }
 
     public static async Task<int> SilenceAsync(

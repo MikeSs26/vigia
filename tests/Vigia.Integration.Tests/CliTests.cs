@@ -169,6 +169,30 @@ public class CliTests(PostgresFixture postgres)
     }
 
     [Fact]
+    public async Task CreateRuleRefusesANoDataHorizonLongerThanSixHours()
+    {
+        // The evaluator reads max(window, no-data) and clamps that read to 6 hours.
+        // An uncapped no-data of 24 hours would produce a rule that finds no samples
+        // in the 6 hours it actually reads and declares NoData there — meaning
+        // something other than what it says, with nothing logging the difference.
+        await using var context = postgres.CreateContext();
+        var stdout = new StringWriter();
+        var stderr = new StringWriter();
+
+        var tenantId = await AdminCommands.CreateTenantAsync(
+            context, "N", $"n-{Guid.NewGuid():N}", DateTimeOffset.UnixEpoch, default);
+
+        var code = await CliRunner.RunAsync(
+            ["create-rule", tenantId.ToString(), "cpu.usage", "avg", "300", "gt", "85",
+             "300", "86400", "warning", "1800"],
+            context, DateTimeOffset.UnixEpoch, stdout, stderr, default);
+
+        Assert.Equal(1, code);
+        Assert.Contains("6 hours", stderr.ToString());
+        Assert.False(await context.AlertRules.AnyAsync(r => r.TenantId == tenantId));
+    }
+
+    [Fact]
     public async Task ANewRuleIsCreatedWithoutAChannel()
     {
         // Silent by default: recording and visible, delivering nothing until a
@@ -190,6 +214,114 @@ public class CliTests(PostgresFixture postgres)
         var rule = await context.AlertRules.SingleAsync(r => r.TenantId == tenantId);
         Assert.Null(rule.ChannelId);
         Assert.True(rule.Enabled);
+    }
+
+    [Fact]
+    public async Task AssignChannelPointsARuleAtAChannelOfItsOwnTenant()
+    {
+        // Without this verb a rule created through the CLI can never deliver
+        // anything: nothing else in src/ ever writes AlertRuleEntity.ChannelId.
+        await using var context = postgres.CreateContext();
+        var stdout = new StringWriter();
+        var stderr = new StringWriter();
+
+        var tenantId = await AdminCommands.CreateTenantAsync(
+            context, "A", $"a-{Guid.NewGuid():N}", DateTimeOffset.UnixEpoch, default);
+
+        var ruleId = await AdminCommands.CreateRuleAsync(
+            context, tenantId, "cpu.usage", RuleAggregation.Avg, 300,
+            ComparisonOperator.Gt, 85, 300, 120, Severity.Warning, 1800, default);
+
+        var channelId = await AdminCommands.CreateChannelAsync(
+            context, tenantId, $"ops-{Guid.NewGuid():N}", Severity.Info, default);
+
+        var code = await CliRunner.RunAsync(
+            ["assign-channel", ruleId.ToString(), channelId.ToString()],
+            context, DateTimeOffset.UnixEpoch, stdout, stderr, default);
+
+        Assert.Equal(0, code);
+
+        var rule = await context.AlertRules.SingleAsync(r => r.Id == ruleId);
+        Assert.Equal(channelId, rule.ChannelId);
+    }
+
+    [Fact]
+    public async Task AssignChannelRefusesAChannelBelongingToAnotherTenant()
+    {
+        // These tables carry no foreign keys, so the tenant match is enforced in the
+        // command or nowhere — and a rule pointing at another tenant's channel would
+        // deliver one tenant's incidents into another tenant's Discord.
+        await using var context = postgres.CreateContext();
+        var stdout = new StringWriter();
+        var stderr = new StringWriter();
+
+        var ownerId = await AdminCommands.CreateTenantAsync(
+            context, "Owner", $"a-{Guid.NewGuid():N}", DateTimeOffset.UnixEpoch, default);
+        var strangerId = await AdminCommands.CreateTenantAsync(
+            context, "Stranger", $"a-{Guid.NewGuid():N}", DateTimeOffset.UnixEpoch, default);
+
+        var ruleId = await AdminCommands.CreateRuleAsync(
+            context, ownerId, "cpu.usage", RuleAggregation.Avg, 300,
+            ComparisonOperator.Gt, 85, 300, 120, Severity.Warning, 1800, default);
+
+        var foreignChannelId = await AdminCommands.CreateChannelAsync(
+            context, strangerId, $"ops-{Guid.NewGuid():N}", Severity.Info, default);
+
+        var code = await CliRunner.RunAsync(
+            ["assign-channel", ruleId.ToString(), foreignChannelId.ToString()],
+            context, DateTimeOffset.UnixEpoch, stdout, stderr, default);
+
+        Assert.Equal(1, code);
+
+        var rule = await context.AlertRules.SingleAsync(r => r.Id == ruleId);
+        Assert.Null(rule.ChannelId);
+    }
+
+    [Fact]
+    public async Task AssignChannelRefusesARuleThatDoesNotExist()
+    {
+        await using var context = postgres.CreateContext();
+        var stdout = new StringWriter();
+        var stderr = new StringWriter();
+
+        var tenantId = await AdminCommands.CreateTenantAsync(
+            context, "A", $"a-{Guid.NewGuid():N}", DateTimeOffset.UnixEpoch, default);
+        var channelId = await AdminCommands.CreateChannelAsync(
+            context, tenantId, $"ops-{Guid.NewGuid():N}", Severity.Info, default);
+
+        // Well past any id this database will reach.
+        var code = await CliRunner.RunAsync(
+            ["assign-channel", int.MaxValue.ToString(), channelId.ToString()],
+            context, DateTimeOffset.UnixEpoch, stdout, stderr, default);
+
+        Assert.Equal(1, code);
+        Assert.NotEqual(string.Empty, stderr.ToString());
+    }
+
+    [Fact]
+    public async Task CreateRuleAcceptsAnOptionalSourceId()
+    {
+        // The spec describes single-source rules; without a twelfth argument every
+        // rule the CLI can create targets every source of the tenant.
+        await using var context = postgres.CreateContext();
+        var stdout = new StringWriter();
+        var stderr = new StringWriter();
+
+        var tenantId = await AdminCommands.CreateTenantAsync(
+            context, "S", $"s-{Guid.NewGuid():N}", DateTimeOffset.UnixEpoch, default);
+
+        var sourceId = await AdminCommands.CreateSourceAsync(
+            context, tenantId, "vps", SourceKind.Host, default);
+
+        var code = await CliRunner.RunAsync(
+            ["create-rule", tenantId.ToString(), "cpu.usage", "avg", "300", "gt", "85",
+             "300", "120", "warning", "1800", sourceId.ToString()],
+            context, DateTimeOffset.UnixEpoch, stdout, stderr, default);
+
+        Assert.Equal(0, code);
+
+        var rule = await context.AlertRules.SingleAsync(r => r.TenantId == tenantId);
+        Assert.Equal(sourceId, rule.SourceId);
     }
 
     [Fact]

@@ -24,8 +24,12 @@ public interface IOutboxStore
         long id, int attempts, DateTimeOffset at, string error, CancellationToken cancellationToken);
 
     /// <summary>
-    /// Drops the oldest undelivered rows beyond <paramref name="maxRows"/>.
-    /// Returns how many were dropped.
+    /// Marks the oldest undelivered rows beyond <paramref name="maxRows"/> as failed.
+    /// Returns how many were marked.
+    ///
+    /// They are marked, not deleted: by the time a message is here the alert has
+    /// already been recorded as notified, so erasing the row would leave that record
+    /// with nothing behind it.
     /// </summary>
-    Task<int> TrimAsync(int maxRows, CancellationToken cancellationToken);
+    Task<int> TrimAsync(int maxRows, DateTimeOffset now, CancellationToken cancellationToken);
 }

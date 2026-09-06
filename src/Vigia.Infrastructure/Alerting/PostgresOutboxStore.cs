@@ -84,7 +84,8 @@ public sealed class PostgresOutboxStore(string connectionString) : IOutboxStore
                 .SetProperty(m => m.LastError, error), cancellationToken);
     }
 
-    public async Task<int> TrimAsync(int maxRows, CancellationToken cancellationToken)
+    public async Task<int> TrimAsync(
+        int maxRows, DateTimeOffset now, CancellationToken cancellationToken)
     {
         await using var context = CreateContext();
 
@@ -107,8 +108,19 @@ public sealed class PostgresOutboxStore(string connectionString) : IOutboxStore
             .Select(m => m.Id)
             .ToListAsync(cancellationToken);
 
+        // Marked failed, never deleted. CommitAsync has already stamped
+        // alert_instances.last_notified_at and written an alert_events row with
+        // suppressed_reason NULL — correct at enqueue time, because the message was
+        // durably queued. Deleting the row now would leave that state reading as
+        // delivered: an alert recorded as notified that was never sent, with nothing
+        // per-row to show it ever existed. The bound still holds, because the
+        // undelivered count above already excludes failed rows.
         return await context.Outbox
             .Where(m => doomed.Contains(m.Id))
-            .ExecuteDeleteAsync(cancellationToken);
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(m => m.FailedAt, now)
+                .SetProperty(m => m.LastError,
+                    $"Dropped: the outbox exceeded {maxRows} undelivered messages"),
+                cancellationToken);
     }
 }

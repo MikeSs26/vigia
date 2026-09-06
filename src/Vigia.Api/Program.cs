@@ -69,7 +69,14 @@ builder.Services.AddHttpClient<IWebhookPublisher, DiscordWebhookPublisher>(clien
 {
     // A hung webhook must not hold a drain cycle open.
     client.Timeout = TimeSpan.FromSeconds(10);
-});
+})
+    // IHttpClientFactory's default logging handlers write the full request URI at
+    // Information. For this client the URI *is* the credential: whoever holds the
+    // Discord webhook URL can post to the channel. The whole design keeps it out of
+    // the database and out of source control, so it must not land in stdout either,
+    // which Docker captures and retains. Removing the loggers here is scoped to this
+    // client and survives someone raising log levels elsewhere.
+    .RemoveAllLoggers();
 
 builder.Services.AddScoped<IApiKeyLookup, ApiKeyLookup>();
 builder.Services.AddScoped<IValidator<IngestRequest>, IngestRequestValidator>();

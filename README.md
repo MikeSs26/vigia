@@ -177,20 +177,39 @@ metric, it stops emitting, and without that state a dead server is indistinguish
 an idle one.
 
 Rules are evaluated against raw points rather than the rollups, so the alert engine cannot
-be wrong because the rollup worker is catching up. Windows are capped at 6 hours to keep
-every alert query inside the raw retention horizon.
+be wrong because the rollup worker is catching up. Both the window and the no-data horizon
+are capped at 6 hours to keep every alert query inside the raw retention horizon.
 
 Notification is never periodic — only a state transition produces a message, so a metric
 pinned above its threshold for three days produces one message when it starts and one when
 it recovers. A new rule is created with no channel and delivers nothing until one is
-assigned. Delivery is suppressed by a global kill switch, an expiring silence on a rule or
-a source, a channel's minimum severity, or the rule's cooldown; whichever applied is
-recorded with the event.
+assigned:
+
+```bash
+dotnet run --project src/Vigia.Cli -- create-channel 1 ops warning
+dotnet run --project src/Vigia.Cli -- create-rule 1 cpu.usage avg 300 gt 85 300 120 warning 1800
+dotnet run --project src/Vigia.Cli -- assign-channel <ruleId> <channelId>
+```
+
+`create-rule` takes an optional trailing source id to scope the rule to one source; without
+it the rule covers every source of the tenant. A channel may only be assigned to a rule of
+the same tenant. The webhook URL itself never enters the database — it is read from the
+environment as `Notifier__ChannelWebhooks__<channelName>`.
+
+Delivery is suppressed by a global kill switch, an expiring silence on a rule or a source,
+a channel's minimum severity, or the rule's cooldown; whichever applied is recorded with
+the event.
 
 Alert evaluation never calls Discord. The message is written to an outbox in the same
 transaction as the state change, and a separate worker drains it with exponential backoff.
 An unreachable Discord accumulates messages and delivers them on recovery instead of
 leaving an alert recorded as sent that never was.
+
+A rate limit is not counted as a failed attempt — draining a backlog necessarily outruns
+Discord's per-webhook limit, and charging those refusals would discard alerts during the
+outage the outbox exists to survive. The outbox is bounded by row count instead, and rows
+beyond the bound are marked failed with a reason rather than deleted, so an alert is never
+left recorded as notified with nothing behind it.
 
 ### The agent
 

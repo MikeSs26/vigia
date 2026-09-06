@@ -140,6 +140,39 @@ public class NotifierWorkerTests(PostgresFixture postgres)
     }
 
     [Fact]
+    public async Task SustainedRateLimitingNeverPermanentlyFailsAMessage()
+    {
+        // Recovering from a long outage means draining a backlog, and draining it at
+        // BatchSize every interval outruns Discord's per-webhook limit — so the
+        // recovery rate-limits itself. If 429 consumed the attempt budget, the outbox
+        // would permanently discard alerts during precisely the scenario it exists to
+        // survive. Being told "not now" is not a failure of the message.
+        var (_, messageId) = await SeedMessageAsync();
+        var time = new FakeTimeProvider(Anchor);
+        var publisher = new StubPublisher(PublishOutcome.RateLimited);
+        var worker = Worker(publisher, time);
+
+        // MaxAttempts is 3 here; run well past it, clearing the 60s delay each time.
+        for (var i = 0; i < 10; i++)
+        {
+            await worker.RunCycleAsync(default);
+            time.SetUtcNow(time.GetUtcNow().AddSeconds(61));
+        }
+
+        Assert.Equal(10, publisher.Calls);
+
+        await using var context = postgres.CreateContext();
+        var message = await context.Outbox.SingleAsync(m => m.Id == messageId);
+
+        Assert.Null(message.FailedAt);
+        Assert.Null(message.SentAt);
+
+        // The budget was never spent: rate limiting says nothing about the message.
+        Assert.Equal(0, message.Attempts);
+        Assert.Contains("Rate limited", message.LastError);
+    }
+
+    [Fact]
     public async Task ABackedOffMessageIsNotRetriedOnTheNextCycleAtTheSameInstant()
     {
         // Backoff only means anything if the claim honours it. Without the
@@ -243,11 +276,18 @@ public class NotifierWorkerTests(PostgresFixture postgres)
     }
 
     [Fact]
-    public async Task TheOutboxBoundDropsTheOldestUndeliveredAndKeepsTheNewest()
+    public async Task TheOutboxBoundMarksTheOldestUndeliveredFailedAndKeepsTheNewest()
     {
         // A Discord outage lasting days must not fill the disk — the same failure
         // the agent's spool bound exists to prevent. In an incident the newest
         // message is the one worth keeping.
+        //
+        // But the excess must be MARKED FAILED, not deleted. By the time a message
+        // reaches the outbox, CommitAsync has already stamped last_notified_at and
+        // written an alert_events row with suppressed_reason NULL — correct at
+        // enqueue time, because the message was durably queued. Deleting the row
+        // afterwards leaves that state reading as "delivered": an alert recorded as
+        // notified that was never sent, with nothing left to show it existed.
         var (channelId, _) = await SeedMessageAsync();
 
         await using (var context = postgres.CreateContext())
@@ -271,12 +311,28 @@ public class NotifierWorkerTests(PostgresFixture postgres)
             .RunCycleAsync(default);
 
         await using var check = postgres.CreateContext();
-        var remaining = await check.Outbox
+        var rows = await check.Outbox
             .Where(m => m.ChannelId == channelId)
             .OrderBy(m => m.CreatedAt)
             .ToListAsync();
 
-        Assert.Equal(5, remaining.Count);
-        Assert.Equal(Anchor.AddMinutes(9), remaining[^1].CreatedAt);
+        // Ten rows in, ten rows out: nothing was erased.
+        Assert.Equal(10, rows.Count);
+
+        // MaxOutboxRows is 5, so the five oldest are the excess.
+        foreach (var dropped in rows.Take(5))
+        {
+            Assert.NotNull(dropped.FailedAt);
+            Assert.Contains("exceeded", dropped.LastError);
+        }
+
+        // The five newest are untouched and still awaiting delivery.
+        foreach (var kept in rows.Skip(5))
+        {
+            Assert.Null(kept.FailedAt);
+            Assert.Null(kept.SentAt);
+        }
+
+        Assert.Equal(Anchor.AddMinutes(9), rows[^1].CreatedAt);
     }
 }

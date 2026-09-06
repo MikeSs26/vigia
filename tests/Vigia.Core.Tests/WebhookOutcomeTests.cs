@@ -18,13 +18,24 @@ public class WebhookOutcomeTests
     }
 
     [Theory]
-    [InlineData(HttpStatusCode.TooManyRequests)]
     [InlineData(HttpStatusCode.InternalServerError)]
     [InlineData(HttpStatusCode.BadGateway)]
     [InlineData(HttpStatusCode.ServiceUnavailable)]
     public void TransientFailuresRetry(HttpStatusCode status)
     {
         Assert.Equal(PublishOutcome.Retry, WebhookOutcomeClassifier.Classify(status));
+    }
+
+    [Fact]
+    public void RateLimitingIsItsOwnOutcomeRatherThanATransientFailure()
+    {
+        // 429 says "not now", not "this failed". Classifying it as Retry spends one
+        // of the message's finite attempts on a refusal that carries no information
+        // about the message, and draining a backlog rate-limits itself: the outbox
+        // would destroy alerts during exactly the outage it exists to survive.
+        Assert.Equal(
+            PublishOutcome.RateLimited,
+            WebhookOutcomeClassifier.Classify(HttpStatusCode.TooManyRequests));
     }
 
     [Theory]
