@@ -78,8 +78,78 @@ public class AlertWorkerTests(PostgresFixture postgres)
         var instance = await context.AlertInstances.SingleAsync(i => i.RuleId == seed.RuleId);
 
         Assert.Equal(AlertState.Firing, instance.State);
-        Assert.True(await context.AlertEvents.AnyAsync(e => e.InstanceId == instance.Id));
         Assert.Equal(0, await context.Outbox.CountAsync(m => m.ChannelId == seed.ChannelId));
+
+        // No suppression layer was responsible — the rule simply has nowhere to
+        // send. Stamping a reason here would misreport why nothing was sent.
+        var fired = await context.AlertEvents
+            .SingleAsync(e => e.InstanceId == instance.Id && e.ToState == AlertState.Firing);
+
+        Assert.Null(fired.SuppressedReason);
+    }
+
+    [Fact]
+    public async Task EnteringPendingDeliversNothing()
+    {
+        // `forSeconds` is non-zero so the first cycle stops at Pending. Nothing
+        // touching Pending may reach a channel — that silence IS the anti-flapping
+        // mechanism, and without this test the guard that enforces it can be
+        // deleted: a premature delivery then gets masked, because the real one a
+        // cycle later is suppressed by its own cooldown and the net count is
+        // unchanged.
+        var seed = await AlertingFixture.SeedAsync(postgres, Anchor, threshold: 50, forSeconds: 300);
+        await AlertingFixture.WritePointsAsync(postgres, seed.SeriesId, Anchor, value: 90);
+
+        await Worker(new FakeTimeProvider(Anchor)).RunCycleAsync(default);
+
+        await using var context = postgres.CreateContext();
+        var instance = await context.AlertInstances.SingleAsync(i => i.RuleId == seed.RuleId);
+
+        Assert.Equal(AlertState.Pending, instance.State);
+        Assert.Equal(0, await context.Outbox.CountAsync(m => m.ChannelId == seed.ChannelId));
+        Assert.Null(instance.LastNotifiedAt);
+    }
+
+    [Fact]
+    public async Task ASilencedRuleRecordsWhyItWasNotDelivered()
+    {
+        // The only test that drives a real suppression through the worker. The
+        // silence targets this rule rather than being global, so it cannot leak
+        // into whatever other test runs next against the shared database.
+        var seed = await AlertingFixture.SeedAsync(postgres, Anchor, threshold: 50, forSeconds: 0);
+        await AlertingFixture.WritePointsAsync(postgres, seed.SeriesId, Anchor, value: 90);
+
+        await using (var setup = postgres.CreateContext())
+        {
+            setup.Silences.Add(new SilenceEntity
+            {
+                TenantId = seed.TenantId,
+                TargetKind = SilenceTarget.Rule,
+                TargetId = seed.RuleId,
+                Until = Anchor.AddHours(1),
+                Reason = "maintenance",
+                CreatedBy = "test",
+            });
+            await setup.SaveChangesAsync();
+        }
+
+        var worker = Worker(new FakeTimeProvider(Anchor));
+        await worker.RunCycleAsync(default);
+        await worker.RunCycleAsync(default);
+
+        await using var context = postgres.CreateContext();
+        var instance = await context.AlertInstances.SingleAsync(i => i.RuleId == seed.RuleId);
+
+        Assert.Equal(AlertState.Firing, instance.State);
+        Assert.Equal(0, await context.Outbox.CountAsync(m => m.ChannelId == seed.ChannelId));
+
+        var fired = await context.AlertEvents
+            .SingleAsync(e => e.InstanceId == instance.Id && e.ToState == AlertState.Firing);
+
+        Assert.Equal(SuppressionReason.Silenced, fired.SuppressedReason);
+
+        // Suppressed means nobody was told, so the cooldown clock must not start.
+        Assert.Null(instance.LastNotifiedAt);
     }
 
     [Fact]
