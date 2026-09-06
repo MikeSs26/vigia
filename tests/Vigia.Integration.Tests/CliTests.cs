@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Vigia.Cli;
 using Vigia.Core;
+using Vigia.Core.Alerting;
 using Vigia.Infrastructure.Entities;
 
 namespace Vigia.Integration.Tests;
@@ -144,5 +145,89 @@ public class CliTests(PostgresFixture postgres)
         Assert.Contains("read", message, StringComparison.Ordinal);
         Assert.Contains("control", message, StringComparison.Ordinal);
         Assert.Equal(string.Empty, stdout.ToString());
+    }
+
+    [Fact]
+    public async Task CreateRuleRefusesAWindowLongerThanSixHours()
+    {
+        // Alerts read raw points, so the window has to stay inside the raw retention
+        // horizon. Refusing at creation is what keeps that guarantee.
+        await using var context = postgres.CreateContext();
+        var stdout = new StringWriter();
+        var stderr = new StringWriter();
+
+        var tenantId = await AdminCommands.CreateTenantAsync(
+            context, "R", $"r-{Guid.NewGuid():N}", DateTimeOffset.UnixEpoch, default);
+
+        var code = await CliRunner.RunAsync(
+            ["create-rule", tenantId.ToString(), "cpu.usage", "avg", "25200", "gt", "85",
+             "300", "120", "warning", "1800"],
+            context, DateTimeOffset.UnixEpoch, stdout, stderr, default);
+
+        Assert.Equal(1, code);
+        Assert.Contains("6 hours", stderr.ToString());
+    }
+
+    [Fact]
+    public async Task ANewRuleIsCreatedWithoutAChannel()
+    {
+        // Silent by default: recording and visible, delivering nothing until a
+        // channel is opted into deliberately.
+        await using var context = postgres.CreateContext();
+        var stdout = new StringWriter();
+        var stderr = new StringWriter();
+
+        var tenantId = await AdminCommands.CreateTenantAsync(
+            context, "R", $"r-{Guid.NewGuid():N}", DateTimeOffset.UnixEpoch, default);
+
+        var code = await CliRunner.RunAsync(
+            ["create-rule", tenantId.ToString(), "cpu.usage", "avg", "300", "gt", "85",
+             "300", "120", "warning", "1800"],
+            context, DateTimeOffset.UnixEpoch, stdout, stderr, default);
+
+        Assert.Equal(0, code);
+
+        var rule = await context.AlertRules.SingleAsync(r => r.TenantId == tenantId);
+        Assert.Null(rule.ChannelId);
+        Assert.True(rule.Enabled);
+    }
+
+    [Fact]
+    public async Task MuteCreatesAnExpiringGlobalSilence()
+    {
+        await using var context = postgres.CreateContext();
+        var stdout = new StringWriter();
+        var stderr = new StringWriter();
+        var now = new DateTimeOffset(2032, 1, 1, 0, 0, 0, TimeSpan.Zero);
+
+        var tenantId = await AdminCommands.CreateTenantAsync(
+            context, "M", $"m-{Guid.NewGuid():N}", now, default);
+
+        var code = await CliRunner.RunAsync(
+            ["mute", tenantId.ToString(), "120", "deploying"],
+            context, now, stdout, stderr, default);
+
+        Assert.Equal(0, code);
+
+        var silence = await context.Silences.SingleAsync(s => s.TenantId == tenantId);
+        Assert.Equal(SilenceTarget.Global, silence.TargetKind);
+        Assert.Equal(now.AddMinutes(120), silence.Until);
+    }
+
+    [Fact]
+    public async Task MuteRefusesAnUnboundedDuration()
+    {
+        // Every silence expires, the kill switch included, so nothing ends up muted
+        // and forgotten.
+        await using var context = postgres.CreateContext();
+        var stdout = new StringWriter();
+        var stderr = new StringWriter();
+
+        var code = await CliRunner.RunAsync(
+            ["mute", "1", "0", "forever"],
+            context, DateTimeOffset.UnixEpoch, stdout, stderr, default);
+
+        Assert.Equal(1, code);
+        Assert.Contains("positive", stderr.ToString());
     }
 }

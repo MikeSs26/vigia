@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Vigia.Core;
+using Vigia.Core.Alerting;
 using Vigia.Infrastructure;
 using Vigia.Infrastructure.Entities;
 
@@ -67,4 +68,84 @@ public static class AdminCommands
         await context.SaveChangesAsync(cancellationToken);
         return true;
     }
+
+    public static async Task<int> CreateChannelAsync(
+        VigiaDbContext context, int tenantId, string name,
+        Severity minSeverity, CancellationToken cancellationToken)
+    {
+        var channel = new NotificationChannelEntity
+        {
+            TenantId = tenantId,
+            Kind = "discord_webhook",
+            Name = name,
+            MinSeverity = minSeverity,
+            Enabled = true,
+        };
+
+        context.NotificationChannels.Add(channel);
+        await context.SaveChangesAsync(cancellationToken);
+
+        return channel.Id;
+    }
+
+    /// <summary>
+    /// Creates a rule with no channel: recording and visible, delivering nothing.
+    /// Opting a rule into a channel is a separate, deliberate act.
+    /// </summary>
+    public static async Task<int> CreateRuleAsync(
+        VigiaDbContext context, int tenantId, string metricName,
+        RuleAggregation aggregation, int windowSeconds, ComparisonOperator op,
+        double threshold, int forSeconds, int noDataAfterSeconds,
+        Severity severity, int cooldownSeconds, CancellationToken cancellationToken)
+    {
+        var rule = new AlertRuleEntity
+        {
+            TenantId = tenantId,
+            SourceId = null,
+            MetricName = metricName,
+            Aggregation = aggregation,
+            WindowSeconds = windowSeconds,
+            Operator = op,
+            Threshold = threshold,
+            ForSeconds = forSeconds,
+            NoDataAfterSeconds = noDataAfterSeconds,
+            Severity = severity,
+            ChannelId = null,
+            CooldownSeconds = cooldownSeconds,
+            Enabled = true,
+        };
+
+        context.AlertRules.Add(rule);
+        await context.SaveChangesAsync(cancellationToken);
+
+        return rule.Id;
+    }
+
+    public static async Task<int> SilenceAsync(
+        VigiaDbContext context, int tenantId, SilenceTarget target, int? targetId,
+        int minutes, string reason, string createdBy, DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        var silence = new SilenceEntity
+        {
+            TenantId = tenantId,
+            TargetKind = target,
+            TargetId = targetId,
+            Until = now.AddMinutes(minutes),
+            Reason = reason,
+            CreatedBy = createdBy,
+        };
+
+        context.Silences.Add(silence);
+        await context.SaveChangesAsync(cancellationToken);
+
+        return silence.Id;
+    }
+
+    public static async Task<int> UnsilenceAsync(
+        VigiaDbContext context, int tenantId, DateTimeOffset now,
+        CancellationToken cancellationToken) =>
+        await context.Silences
+            .Where(s => s.TenantId == tenantId && s.Until > now)
+            .ExecuteDeleteAsync(cancellationToken);
 }
