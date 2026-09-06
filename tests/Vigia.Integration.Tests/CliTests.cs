@@ -198,7 +198,14 @@ public class CliTests(PostgresFixture postgres)
         await using var context = postgres.CreateContext();
         var stdout = new StringWriter();
         var stderr = new StringWriter();
-        var now = new DateTimeOffset(2032, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        // Anchored in the PAST on purpose. A silence has no start time, only an
+        // expiry, so one whose `until` lies in the future is active immediately no
+        // matter when it was created — and a GLOBAL silence is loaded without a
+        // tenant filter, so it would mute every other test class for the rest of the
+        // run against this shared database. Dating it into the past means the row is
+        // already expired for everyone else while still proving what this test is
+        // about: that mute writes a global silence with a bounded expiry.
+        var now = new DateTimeOffset(2020, 1, 1, 0, 0, 0, TimeSpan.Zero);
 
         var tenantId = await AdminCommands.CreateTenantAsync(
             context, "M", $"m-{Guid.NewGuid():N}", now, default);
