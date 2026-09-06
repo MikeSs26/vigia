@@ -237,4 +237,102 @@ public class CliTests(PostgresFixture postgres)
         Assert.Equal(1, code);
         Assert.Contains("positive", stderr.ToString());
     }
+
+    [Fact]
+    public async Task ARuleWindowOfExactlySixHoursIsAccepted()
+    {
+        // "At most 6 hours" puts the boundary on the allowed side. A refusal test
+        // using a value well past the cap passes under any nearby comparison, so it
+        // pins nothing about where the line actually falls — these two do.
+        await using var context = postgres.CreateContext();
+        var stdout = new StringWriter();
+        var stderr = new StringWriter();
+
+        var tenantId = await AdminCommands.CreateTenantAsync(
+            context, "B", $"b-{Guid.NewGuid():N}", DateTimeOffset.UnixEpoch, default);
+
+        var code = await CliRunner.RunAsync(
+            ["create-rule", tenantId.ToString(), "cpu.usage", "avg", "21600", "gt", "85",
+             "300", "120", "warning", "1800"],
+            context, DateTimeOffset.UnixEpoch, stdout, stderr, default);
+
+        Assert.Equal(0, code);
+    }
+
+    [Fact]
+    public async Task ARuleWindowOneSecondOverSixHoursIsRefused()
+    {
+        await using var context = postgres.CreateContext();
+        var stdout = new StringWriter();
+        var stderr = new StringWriter();
+
+        var tenantId = await AdminCommands.CreateTenantAsync(
+            context, "B", $"b-{Guid.NewGuid():N}", DateTimeOffset.UnixEpoch, default);
+
+        var code = await CliRunner.RunAsync(
+            ["create-rule", tenantId.ToString(), "cpu.usage", "avg", "21601", "gt", "85",
+             "300", "120", "warning", "1800"],
+            context, DateTimeOffset.UnixEpoch, stdout, stderr, default);
+
+        Assert.Equal(1, code);
+        Assert.Contains("6 hours", stderr.ToString());
+    }
+
+    [Fact]
+    public async Task SilenceRefusesGlobalAndPointsAtMuteInstead()
+    {
+        // Global suppression goes through `mute`, which is the one path that cannot
+        // be given a target id by mistake.
+        await using var context = postgres.CreateContext();
+        var stdout = new StringWriter();
+        var stderr = new StringWriter();
+
+        var code = await CliRunner.RunAsync(
+            ["silence", "1", "global", "1", "60", "deploying"],
+            context, DateTimeOffset.UnixEpoch, stdout, stderr, default);
+
+        Assert.Equal(1, code);
+        Assert.Contains("mute", stderr.ToString());
+    }
+
+    [Fact]
+    public async Task SilenceRefusesATargetIdThatIsNotAnInteger()
+    {
+        await using var context = postgres.CreateContext();
+        var stdout = new StringWriter();
+        var stderr = new StringWriter();
+
+        var code = await CliRunner.RunAsync(
+            ["silence", "1", "rule", "not-a-number", "60", "maintenance"],
+            context, DateTimeOffset.UnixEpoch, stdout, stderr, default);
+
+        Assert.Equal(1, code);
+    }
+
+    [Fact]
+    public async Task SilenceCreatesAnExpiringSilenceForOneRule()
+    {
+        // Anchored in the past, like the mute test: a silence has no start time, only
+        // an expiry, so dating it behind every other class's clock keeps this shared
+        // database free of a row that could suppress somebody else's alerts.
+        await using var context = postgres.CreateContext();
+        var stdout = new StringWriter();
+        var stderr = new StringWriter();
+        var now = new DateTimeOffset(2020, 1, 1, 0, 0, 0, TimeSpan.Zero);
+
+        var tenantId = await AdminCommands.CreateTenantAsync(
+            context, "S", $"s-{Guid.NewGuid():N}", now, default);
+
+        var code = await CliRunner.RunAsync(
+            ["silence", tenantId.ToString(), "rule", "42", "60", "maintenance"],
+            context, now, stdout, stderr, default);
+
+        Assert.Equal(0, code);
+
+        var silence = await context.Silences.SingleAsync(s => s.TenantId == tenantId);
+
+        Assert.Equal(SilenceTarget.Rule, silence.TargetKind);
+        Assert.Equal(42, silence.TargetId);
+        Assert.Equal(now.AddMinutes(60), silence.Until);
+    }
 }
