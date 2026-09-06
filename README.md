@@ -19,8 +19,8 @@ diacritic everywhere: repository, namespace and documentation.
 
 ## Status
 
-The ingestion path is complete and running continuously in production. The read and
-alerting paths are not built yet.
+The ingestion, read and alerting paths are built. Ingestion has been running continuously
+in production; the alerting engine is complete and tested but not yet deployed.
 
 **Working today**
 
@@ -36,10 +36,15 @@ alerting paths are not built yet.
   and a restart after an outage the same operation.
 - `GET /v1/series`, which picks the finest granularity that fits the requested window and
   refuses combinations that would return more than it should.
+- Alert rules evaluated on a schedule against raw points, with a `Pending` stage that
+  absorbs transient spikes and a `NoData` state for a host that stops reporting at all.
+- A transactional outbox: an alert's state change and the message announcing it commit
+  together, and a separate worker drains it to a Discord webhook with exponential backoff,
+  an attempt cap and a bound on how much may queue up during an outage.
 
 **Not built yet**
 
-- The alert engine, the notification outbox and the Discord integration.
+- The Discord bot's slash commands and the digest mode.
 - SignalR streaming, the dashboard and the public status endpoint.
 
 ## Architecture
@@ -53,7 +58,7 @@ the only external dependency.
 | `Vigia.Api` | ASP.NET Core | HTTP surface, background workers, composition root. |
 | `Vigia.Infrastructure` | class library | EF Core `DbContext` and migrations, the `COPY` writer, partition maintenance. |
 | `Vigia.Agent` | worker service | Host metrics collector, deployed to each monitored host. |
-| `Vigia.Cli` | console | Administration: tenants, sources, API keys. |
+| `Vigia.Cli` | console | Administration: tenants, sources, API keys, notification channels, alert rules and silences. |
 
 `Vigia.Core` receives data and returns decisions. It never reads, never writes, never
 sleeps and never asks what time it is — the current instant is always a parameter. That is
