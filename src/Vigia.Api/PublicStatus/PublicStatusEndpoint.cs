@@ -28,7 +28,9 @@ public static class PublicStatusEndpoint
             return;
         }
 
-        app.MapGet("/public/status", async (
+        // GET and HEAD. Uptime monitors and nginx health checks default to HEAD,
+        // and a route that answers 405 to them reports the page as down.
+        app.MapMethods("/public/status", ["GET", "HEAD"], async (
                 PublicStatusSnapshotCache cache, CancellationToken cancellationToken) =>
             {
                 var snapshot = await cache.GetAsync(cancellationToken);
@@ -38,7 +40,7 @@ public static class PublicStatusEndpoint
             .AllowAnonymous()
             .RequireRateLimiting(RateLimitingPolicies.Public);
 
-        app.MapGet("/public/status.json", async (
+        app.MapMethods("/public/status.json", ["GET", "HEAD"], async (
                 PublicStatusSnapshotCache cache, CancellationToken cancellationToken) =>
             {
                 var snapshot = await cache.GetAsync(cancellationToken);
@@ -95,6 +97,7 @@ public static class PublicStatusEndpoint
             font:15px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
             main{max-width:46rem;margin:0 auto}
             h1{font-size:1.35rem;margin:0 0 .25rem}
+            .by{color:var(--dim);font-weight:400;font-size:.85rem}
             .sub{color:var(--dim);font-size:.85rem;margin:0 0 2rem}
             .card{background:var(--card);border:1px solid var(--line);border-radius:10px;
             padding:1rem 1.15rem;margin-bottom:.75rem}
@@ -122,7 +125,7 @@ public static class PublicStatusEndpoint
             </style>
             </head>
             <body><main>
-            <h1>Vigia</h1>
+            <h1>Vigia <span class="by">by MikeSs26</span></h1>
             """);
 
         html.Append(CultureInfo.InvariantCulture, $"""

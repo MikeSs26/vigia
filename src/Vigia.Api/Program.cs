@@ -51,6 +51,20 @@ builder.Services.Configure<NotifierOptions>(
     builder.Configuration.GetSection(NotifierOptions.SectionName));
 builder.Services.AddVigiaRateLimiting();
 
+// The status page is the only response anyone fetches repeatedly, and it is
+// mostly repeated markup, so it compresses to roughly a third of its size. That
+// matters because every open browser tab refreshes it on a timer: the bandwidth
+// bill is per byte served, not per request.
+//
+// Safe to enable here despite BREACH: nothing in these responses mixes a secret
+// with attacker-controlled input. The status page reflects no input at all, and
+// the authenticated endpoints return the caller's own data.
+builder.Services.AddResponseCompression(options =>
+{
+    options.EnableForHttps = true;
+    options.MimeTypes = ["text/html", "application/json"];
+});
+
 builder.Services.AddSingleton<IMetricQueue, BoundedChannelMetricQueue>();
 builder.Services.AddSingleton<ISeriesResolver>(_ => new SeriesResolver(connectionString));
 builder.Services.AddSingleton<ISourceResolver>(_ => new SourceResolver(connectionString));
@@ -116,6 +130,8 @@ builder.Services.AddAuthorizationBuilder()
 builder.Services.AddProblemDetails();
 
 var app = builder.Build();
+
+app.UseResponseCompression();
 
 app.UseAuthentication();
 app.UseAuthorization();

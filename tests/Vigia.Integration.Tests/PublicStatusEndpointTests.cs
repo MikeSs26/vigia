@@ -146,6 +146,76 @@ public class PublicStatusEndpointTests(PostgresFixture postgres) : IAsyncLifetim
     }
 
     [Fact]
+    public async Task AnotherTenantsIncidentStaysHiddenEvenWhenItsRuleIsDeleted()
+    {
+        // The hole a security review found in the first version of this page.
+        // The history LEFT JOINs alert_rules so an incident survives the deletion
+        // of the rule that raised it — but the tenant filter used to hang off
+        // that LEFT JOINed column, and an orphaned row has a NULL tenant, so the
+        // predicate written to tolerate the NULL stopped filtering by tenant at
+        // all. One tenant deleting a rule put another tenant's source name on a
+        // page anyone can read.
+        string otherSourceName;
+
+        await using (var connection = await postgres.OpenConnectionAsync())
+        {
+            int otherTenant;
+            int otherSource;
+
+            await using (var context = postgres.CreateContext())
+            {
+                otherTenant = await AdminCommands.CreateTenantAsync(
+                    context, "Hidden", $"hid-{Guid.NewGuid():N}", Anchor, default);
+
+                otherSourceName = $"CONFIDENTIAL-{Guid.NewGuid():N}";
+                otherSource = await AdminCommands.CreateSourceAsync(
+                    context, otherTenant, otherSourceName, SourceKind.Host, default);
+            }
+
+            // A rule, an instance and a firing event belonging to that tenant.
+            await using var seed = new NpgsqlCommand(
+                """
+                WITH r AS (
+                    INSERT INTO alert_rules
+                        (tenant_id, source_id, metric_name, aggregation, window_seconds,
+                         operator, threshold, for_seconds, no_data_after_seconds,
+                         severity, cooldown_seconds, enabled)
+                    VALUES (@t, @s, 'cpu.usage', 0, 300, 0, 85, 300, 120, 1, 1800, true)
+                    RETURNING id
+                ), i AS (
+                    INSERT INTO alert_instances
+                        (rule_id, source_id, state, state_since, last_evaluated_at)
+                    SELECT r.id, @s, 2, @at, @at FROM r
+                    RETURNING id, rule_id
+                )
+                INSERT INTO alert_events (instance_id, from_state, to_state, at)
+                SELECT i.id, 1, 2, @at FROM i
+                RETURNING (SELECT rule_id FROM i);
+                """, connection);
+
+            seed.Parameters.AddWithValue("t", otherTenant);
+            seed.Parameters.AddWithValue("s", otherSource);
+            seed.Parameters.AddWithValue("at", Anchor.ToUniversalTime());
+
+            var otherRuleId = (int)(await seed.ExecuteScalarAsync())!;
+
+            // Now delete the rule, orphaning the instance and its event.
+            await using var drop = new NpgsqlCommand(
+                "DELETE FROM alert_rules WHERE id = @id;", connection);
+            drop.Parameters.AddWithValue("id", otherRuleId);
+            await drop.ExecuteNonQueryAsync();
+        }
+
+        await using var factory = Factory(enabled: true);
+
+        var html = await factory.CreateClient().GetStringAsync("/public/status");
+        var json = await factory.CreateClient().GetStringAsync("/public/status.json");
+
+        Assert.DoesNotContain(otherSourceName, html);
+        Assert.DoesNotContain(otherSourceName, json);
+    }
+
+    [Fact]
     public async Task TheJsonViewCarriesTheSameFactsAsThePage()
     {
         await using var factory = Factory(enabled: true);

@@ -139,23 +139,33 @@ public sealed class PostgresPublicStatusReader(string connectionString) : IPubli
     private static async Task<IReadOnlyList<PublicIncident>> ReadIncidentsAsync(
         NpgsqlConnection connection, PublicStatusQuery query, CancellationToken cancellationToken)
     {
-        // LEFT JOIN throughout, on purpose. These tables carry no foreign keys,
-        // so a rule or source deleted out from under its history is reachable
-        // state, and an inner join would make those incidents disappear from the
-        // page with nothing to show they had ever existed.
+        // The tenant is taken from the SOURCE, not the rule.
+        //
+        // The rule is LEFT JOINed so that an incident survives the deletion of
+        // the rule that raised it — these tables carry no foreign keys, so that
+        // is reachable state, and the metric simply reads "(removed)". But the
+        // tenant filter cannot hang off a LEFT JOINed column: an orphaned row
+        // has a NULL tenant, and a predicate written to tolerate that NULL
+        // stops filtering by tenant at all. An earlier version of this query did
+        // exactly that, and one tenant's deleted rule put another tenant's
+        // source name on a public page.
+        //
+        // `sources` is the tenancy anchor and is INNER JOINed on purpose: on a
+        // page anyone can read, an incident whose tenant cannot be established
+        // is not shown. Unknown ownership must fail closed.
         await using var command = new NpgsqlCommand(
             """
             SELECT e.instance_id,
-                   COALESCE(so.name, '(removed)'),
+                   so.name,
                    COALESCE(r.metric_name, '(removed)'),
                    e.from_state,
                    e.to_state,
                    e.at
             FROM alert_events e
             JOIN alert_instances i ON i.id = e.instance_id
+            JOIN sources so ON so.id = i.source_id
             LEFT JOIN alert_rules r ON r.id = i.rule_id
-            LEFT JOIN sources so ON so.id = i.source_id
-            WHERE r.tenant_id = @tenant OR r.tenant_id IS NULL
+            WHERE so.tenant_id = @tenant
             ORDER BY e.at DESC
             LIMIT @limit;
             """, connection);

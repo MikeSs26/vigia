@@ -29,6 +29,13 @@ services:
     # of front-end/version; deploy.resources.limits is Swarm-oriented and only
     # honoured here as a version-specific behaviour.
     mem_limit: 384M
+    # Same reasoning as the api service: unrotated container logs are a slow
+    # path to a full disk, and a full disk stops PostgreSQL accepting writes.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     ports:
       # Loopback only, never 0.0.0.0: the host firewall already allows just 22,
       # 80 and 443 inbound, so this port was never reachable from outside the
@@ -103,6 +110,16 @@ services:
       # host firewall allows just 22, 80 and 443 from outside.
       - "127.0.0.1:8080:8080"
     mem_limit: 256M
+    # Docker's json-file driver keeps every line forever unless told otherwise,
+    # and a rejected API key writes one. An anonymous caller sending junk keys is
+    # therefore a write primitive against the host disk — and when PostgreSQL is
+    # unreachable each such request logs a stack trace instead of a line, which
+    # accelerates it by roughly sixty times at exactly the wrong moment.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     # Docker's default is 10 seconds, and IngestionWorker's decision to finish
     # in-flight writes with CancellationToken.None rather than abandon them is
     # explicitly load-bearing on this number: on SIGTERM the worker flushes its

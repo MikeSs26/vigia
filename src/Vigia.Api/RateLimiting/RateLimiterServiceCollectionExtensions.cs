@@ -25,16 +25,63 @@ public static class RateLimiterServiceCollectionExtensions
             // different failure mode, so a client handles both the same way.
             options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
 
+            // A ceiling over EVERY request, including routes that carry no
+            // policy of their own.
+            //
+            // This exists because authentication runs before the rate limiter,
+            // and the API-key handler queries the database the moment an
+            // X-Api-Key header is present — on any path, including /health and
+            // paths that match nothing. Without a global limit, an anonymous
+            // caller sending junk keys drives a PostgreSQL lookup per request
+            // against the same ten-connection pool the ingestion, rollup and
+            // alert workers share, and writes a log line per request to a
+            // container log with no rotation. Measured at nearly three thousand
+            // queries a second from one machine.
+            //
+            // Partitioned by address rather than by key, because the requests
+            // this is defending against have no valid key. Generous enough that
+            // no honest client meets it: a browser holding the status page open
+            // refreshes twice a minute, and the agent posts once every ten
+            // seconds.
+            options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(
+                httpContext => RateLimitPartition.GetFixedWindowLimiter(
+                    httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+                    _ => new FixedWindowRateLimiterOptions
+                    {
+                        PermitLimit = 300,
+                        Window = TimeSpan.FromMinutes(1),
+                        QueueLimit = 0,
+                        QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+                    }));
+
             options.OnRejected = async (context, cancellationToken) =>
             {
-                var retryAfterSeconds = context.HttpContext.RequestServices
-                    .GetRequiredService<IOptions<RateLimitingOptions>>().Value.WindowSeconds;
+                var services = context.HttpContext.RequestServices;
+
+                // Which window to advertise depends on which limit was hit. The
+                // public page has its own, and quoting the API-key window there
+                // would tell an anonymous caller to come back at the wrong time.
+                var isPublic = context.HttpContext.Request.Path
+                    .StartsWithSegments("/public", StringComparison.OrdinalIgnoreCase);
+
+                var retryAfterSeconds = isPublic
+                    ? services.GetRequiredService<IOptions<PublicStatus.PublicStatusOptions>>()
+                        .Value.WindowSeconds
+                    : services.GetRequiredService<IOptions<RateLimitingOptions>>()
+                        .Value.WindowSeconds;
 
                 context.HttpContext.Response.Headers[HeaderNames.RetryAfter] =
                     retryAfterSeconds.ToString(CultureInfo.InvariantCulture);
 
+                // A keyed client benefits from knowing the budget is its own; an
+                // anonymous one has no key to be told about.
                 await context.HttpContext.Response.WriteAsJsonAsync(
-                    new { error = "Rate limit exceeded for this API key." },
+                    new
+                    {
+                        error = isPublic
+                            ? "Rate limit exceeded."
+                            : "Rate limit exceeded for this API key.",
+                    },
                     cancellationToken);
             };
 
