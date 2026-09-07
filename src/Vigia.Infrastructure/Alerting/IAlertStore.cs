@@ -8,6 +8,7 @@ public readonly record struct EvaluationTarget(
     string MetricName,
     int TenantId,
     int SourceId,
+    string SourceName,
     int? ChannelId,
     AlertInstanceState State,
     DateTimeOffset? LastNotifiedAt);

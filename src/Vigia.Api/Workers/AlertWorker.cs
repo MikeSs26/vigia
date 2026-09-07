@@ -1,8 +1,8 @@
-using System.Text.Json;
 using Microsoft.Extensions.Options;
 using Vigia.Core.Alerting;
 using Vigia.Core.Querying;
 using Vigia.Infrastructure.Alerting;
+using Vigia.Infrastructure.Notifications;
 using Vigia.Infrastructure.Querying;
 
 namespace Vigia.Api.Workers;
@@ -132,22 +132,9 @@ public sealed class AlertWorker(
             .ToList();
     }
 
-    private static string Compose(EvaluationTarget target, AlertTransition transition)
-    {
-        var verb = transition.To switch
-        {
-            AlertState.Firing => "FIRING",
-            AlertState.NoData => "NO DATA",
-            _ => "RESOLVED",
-        };
-
-        var value = transition.Value is { } v ? $" (value {v:0.##})" : string.Empty;
-
-        return JsonSerializer.Serialize(new
-        {
-            content = $"**{verb}** `{target.MetricName}` on source {target.SourceId}{value}",
-        });
-    }
+    private static string Compose(EvaluationTarget target, AlertTransition transition) =>
+        DiscordMessageComposer.Compose(
+            transition, target.MetricName, target.SourceName, target.Rule);
 
     private static async Task<bool> WaitAsync(
         PeriodicTimer timer, CancellationToken cancellationToken)

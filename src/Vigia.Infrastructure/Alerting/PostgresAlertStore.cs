@@ -24,8 +24,10 @@ public sealed class PostgresAlertStore(string connectionString) : IAlertStore
             .Where(r => r.Enabled)
             .ToListAsync(cancellationToken);
 
+        // The name travels with the id because the notification names the source
+        // a human recognises. "on source 1" tells the reader nothing.
         var sources = await context.Sources
-            .Select(s => new { s.Id, s.TenantId })
+            .Select(s => new { s.Id, s.TenantId, s.Name })
             .ToListAsync(cancellationToken);
 
         var instances = await context.AlertInstances.ToListAsync(cancellationToken);
@@ -51,6 +53,7 @@ public sealed class PostgresAlertStore(string connectionString) : IAlertStore
                     MetricName: rule.MetricName,
                     TenantId: rule.TenantId,
                     SourceId: source.Id,
+                    SourceName: source.Name,
                     ChannelId: rule.ChannelId,
                     // Never evaluated yet: start from Ok so the first breach is a
                     // transition rather than an invisible jump into Firing.
