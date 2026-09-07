@@ -93,6 +93,11 @@ services:
       # message for a channel with no usable URL is failed with a recorded
       # reason rather than retried silently.
       Notifier__ChannelWebhooks__ops: ${Notifier__ChannelWebhooks__ops:-}
+      # The public status page is the only route that answers without an API key,
+      # so it is opted into rather than appearing the moment this file is
+      # deployed. Empty means off, and off means the route is not registered at
+      # all — a request for it is a 404 like any other unknown path.
+      PublicStatus__Enabled: ${PublicStatus__Enabled:-false}
     ports:
       # Bound to loopback only: nginx terminates TLS and proxies inward, and the
       # host firewall allows just 22, 80 and 443 from outside.
