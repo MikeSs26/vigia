@@ -71,7 +71,7 @@ services:
     # service already passes its own connection string.
     environment:
       VIGIA_DESIGN_CONNECTION: >-
-        Host=postgres;Port=5432;Database=${POSTGRES_DB};Username=${POSTGRES_USER};Password=${POSTGRES_PASSWORD}
+        Host=postgres;Port=5432;Database=${POSTGRES_DB};Username=${VIGIA_DB_USER};Password=${VIGIA_DB_PASSWORD}
     # Small and generous: the bundle is a short-lived EF migrator, not the api
     # workload, but it still needs a cap so nothing can eat the host's 1 GB
     # while postgres (384M) and api (256M) are also coming up.
@@ -89,8 +89,15 @@ services:
       migrate:
         condition: service_completed_successfully
     environment:
+      # VIGIA_DB_USER is deliberately NOT POSTGRES_USER. The latter is the
+      # bootstrap superuser the image creates, and PostgreSQL refuses to remove
+      # SUPERUSER from it — so an application connecting as that role can run
+      # COPY FROM PROGRAM, which is command execution inside the database
+      # container, and read any file the server can reach. The application role
+      # owns every table instead, which is all the partition maintenance needs,
+      # and holds no superuser attribute.
       ConnectionStrings__Vigia: >-
-        Host=postgres;Port=5432;Database=${POSTGRES_DB};Username=${POSTGRES_USER};Password=${POSTGRES_PASSWORD};Maximum Pool Size=10
+        Host=postgres;Port=5432;Database=${POSTGRES_DB};Username=${VIGIA_DB_USER};Password=${VIGIA_DB_PASSWORD};Maximum Pool Size=10
       ASPNETCORE_ENVIRONMENT: Production
       # Discord webhook per notification channel, named after the channel given
       # to `create-channel`. Passed through explicitly rather than by env_file,
