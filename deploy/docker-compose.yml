@@ -85,6 +85,14 @@ services:
       ConnectionStrings__Vigia: >-
         Host=postgres;Port=5432;Database=${POSTGRES_DB};Username=${POSTGRES_USER};Password=${POSTGRES_PASSWORD};Maximum Pool Size=10
       ASPNETCORE_ENVIRONMENT: Production
+      # Discord webhook per notification channel, named after the channel given
+      # to `create-channel`. Passed through explicitly rather than by env_file,
+      # so the database password in the same file does not also land in this
+      # container's environment. Empty when unset, which is harmless: a channel
+      # only receives anything once a rule is deliberately assigned to it, and a
+      # message for a channel with no usable URL is failed with a recorded
+      # reason rather than retried silently.
+      Notifier__ChannelWebhooks__ops: ${Notifier__ChannelWebhooks__ops:-}
     ports:
       # Bound to loopback only: nginx terminates TLS and proxies inward, and the
       # host firewall allows just 22, 80 and 443 from outside.
