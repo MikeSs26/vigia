@@ -79,6 +79,34 @@ public static class RateLimiterServiceCollectionExtensions
                     QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
                 });
             });
+
+            // The public status page has no key to partition by, so it
+            // partitions by client address instead.
+            //
+            // Behind a reverse proxy every request arrives from the proxy unless
+            // forwarded headers are configured, which collapses this into a
+            // single shared budget. That is a weaker guarantee than the per-key
+            // policies give, and it is acceptable here only because the response
+            // is served from a cache: the cost of a request that gets through is
+            // rendering a string, not touching PostgreSQL.
+            options.AddPolicy(RateLimitingPolicies.Public, httpContext =>
+            {
+                var publicStatus = httpContext.RequestServices
+                    .GetRequiredService<IOptions<PublicStatus.PublicStatusOptions>>().Value;
+
+                var address = httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+
+                return RateLimitPartition.GetFixedWindowLimiter(address, _ => new FixedWindowRateLimiterOptions
+                {
+                    PermitLimit = publicStatus.PermitLimit,
+                    Window = TimeSpan.FromSeconds(publicStatus.WindowSeconds),
+
+                    // No queueing: an anonymous caller over the limit is turned
+                    // away immediately rather than parked, holding a connection.
+                    QueueLimit = 0,
+                    QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+                });
+            });
         });
 
         return services;

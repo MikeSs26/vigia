@@ -5,6 +5,7 @@ using Microsoft.EntityFrameworkCore;
 using Serilog;
 using Vigia.Api.Auth;
 using Vigia.Api.Ingest;
+using Vigia.Api.PublicStatus;
 using Vigia.Api.Queue;
 using Vigia.Api.Querying;
 using Vigia.Api.RateLimiting;
@@ -16,6 +17,7 @@ using Vigia.Infrastructure.Alerting;
 using Vigia.Infrastructure.Auth;
 using Vigia.Infrastructure.Notifications;
 using Vigia.Infrastructure.Partitions;
+using Vigia.Infrastructure.PublicStatus;
 using Vigia.Infrastructure.Querying;
 using Vigia.Infrastructure.Rollups;
 using Vigia.Infrastructure.Series;
@@ -41,6 +43,8 @@ builder.Services.Configure<RateLimitingOptions>(
     builder.Configuration.GetSection(RateLimitingOptions.SectionName));
 builder.Services.Configure<RollupOptions>(
     builder.Configuration.GetSection(RollupOptions.SectionName));
+builder.Services.Configure<PublicStatusOptions>(
+    builder.Configuration.GetSection(PublicStatusOptions.SectionName));
 builder.Services.Configure<AlertOptions>(
     builder.Configuration.GetSection(AlertOptions.SectionName));
 builder.Services.Configure<NotifierOptions>(
@@ -58,6 +62,9 @@ builder.Services.AddSingleton<IPartitionMaintenance>(
 
 builder.Services.AddSingleton(new GranularityResolver(QueryLimits.Default));
 builder.Services.AddSingleton<IMetricQueryReader>(_ => new PostgresMetricQueryReader(connectionString));
+builder.Services.AddSingleton<IPublicStatusReader>(
+    _ => new PostgresPublicStatusReader(connectionString));
+builder.Services.AddSingleton<PublicStatusSnapshotCache>();
 builder.Services.AddSingleton<IRollupWatermarkStore>(
     _ => new PostgresRollupWatermarkStore(connectionString));
 builder.Services.AddSingleton<IRollupAggregator>(
@@ -116,6 +123,7 @@ app.UseRateLimiter();
 
 app.MapIngest();
 app.MapSeries();
+app.MapPublicStatus();
 app.MapGet("/health", () => Results.Ok(new { status = "ok" })).AllowAnonymous();
 
 app.Run();
